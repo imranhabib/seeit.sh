@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- seeit (Node) ---
+node_modules/
+data/
