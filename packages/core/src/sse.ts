@@ -1,9 +1,12 @@
-// Incremental parser for Server-Sent Events (SSE), the format both Anthropic
-// and OpenAI use for streaming responses.
+// SSE (Server-Sent Events) parsing, the format both Anthropic and OpenAI use
+// for streaming responses.
 //
-// Network chunks do not line up with events: one chunk can hold half an event,
-// or several events. So the parser keeps a buffer and only returns events
-// that are complete (ended by a blank line).
+// The framing work (buffering across chunk boundaries, CRLF / lone CR line
+// endings, comments, id / retry fields) is done by the spec-compliant
+// `eventsource-parser` library. This file only adapts it to a small
+// push / flush API: feed text chunks in, get complete events out.
+
+import { createParser } from "eventsource-parser";
 
 export type SseEvent = {
   event?: string;
@@ -11,46 +14,36 @@ export type SseEvent = {
 };
 
 export function createSseParser() {
-  let buffer = "";
+  let completed: SseEvent[] = [];
+  const parser = createParser({
+    onEvent: (e) => completed.push({ event: e.event, data: e.data }),
+  });
+
+  const take = () => {
+    const events = completed;
+    completed = [];
+    return events;
+  };
 
   return {
     /** Add a chunk of text. Returns the events completed by this chunk. */
     push(chunk: string): SseEvent[] {
-      // Normalize CRLF after appending, so a "\r\n" split across two chunks
-      // is still handled.
-      buffer = (buffer + chunk).replace(/\r\n/g, "\n");
-      const events: SseEvent[] = [];
-      let end: number;
-      while ((end = buffer.indexOf("\n\n")) !== -1) {
-        const event = parseBlock(buffer.slice(0, end));
-        buffer = buffer.slice(end + 2);
-        if (event) events.push(event);
-      }
-      return events;
+      parser.feed(chunk);
+      return take();
     },
 
-    /** Call at end of stream. Returns a last event that had no blank line after it. */
+    /**
+     * Call at end of stream. Returns a last event that had no blank line after
+     * it. The SSE spec says to drop such an event; we keep it on purpose,
+     * because for a truncated call a partial last event still helps estimate
+     * output tokens.
+     */
     flush(): SseEvent[] {
-      const rest = buffer;
-      buffer = "";
-      const event = parseBlock(rest);
-      return event ? [event] : [];
+      // A blank line is what dispatches an event, so supply the one the
+      // stream never sent. If nothing is pending, this dispatches nothing.
+      parser.feed("\n\n");
+      parser.reset();
+      return take();
     },
   };
-}
-
-function parseBlock(block: string): SseEvent | null {
-  let event: string | undefined;
-  const data: string[] = [];
-  for (const line of block.split("\n")) {
-    if (line === "" || line.startsWith(":")) continue; // ":" starts a comment (keep-alive)
-    const colon = line.indexOf(":");
-    const field = colon === -1 ? line : line.slice(0, colon);
-    let value = colon === -1 ? "" : line.slice(colon + 1);
-    if (value.startsWith(" ")) value = value.slice(1);
-    if (field === "event") event = value;
-    else if (field === "data") data.push(value);
-  }
-  if (event === undefined && data.length === 0) return null;
-  return { event, data: data.join("\n") };
 }

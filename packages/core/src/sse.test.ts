@@ -34,6 +34,17 @@ describe("createSseParser", () => {
     expect(parseInChunks(STREAM, size)).toEqual(EXPECTED);
   });
 
+  it("handles lone CR line endings (the spec allows them)", () => {
+    expect(parseInChunks("event: a\rdata: 1\r\rdata: 2\r\r", 1)).toEqual([
+      { event: "a", data: "1" },
+      { event: undefined, data: "2" },
+    ]);
+  });
+
+  it("does not dispatch an event that has no data line", () => {
+    expect(parseInChunks("event: lonely\n\ndata: x\n\n", 3)).toEqual([{ event: undefined, data: "x" }]);
+  });
+
   it("returns a final event without a trailing blank line on flush", () => {
     const parser = createSseParser();
     expect(parser.push("event: done\ndata: x")).toEqual([]);
