@@ -153,6 +153,65 @@ These rules are the performance-critical part of the system:
   connections during long model pauses (for example nginx closes after 60 s of
   no data by default). Raise its read timeout and turn off response buffering.
 
+### CLI
+
+A `seeit` command for running and inspecting the gateway from a terminal. It
+replaces the ad-hoc tools used so far: the `q()` sqlite3 helper,
+`pnpm summarize`, and calling `make-fixture.ts` by hand. The dashboard is for
+browsing and charts; the CLI is for quick answers and scripting.
+
+**Naming rule.** Commands follow the data model (Session → Turn → Call). A
+plural noun lists (`calls`), a singular noun shows one (`call <id>`).
+
+| Command | What it answers | Phase |
+| --- | --- | --- |
+| `seeit start` | Run the gateway (later: as the `launchd` service) | 1 |
+| `seeit status` | Is the gateway up, which database, is each harness pointed at it | 1 |
+| `seeit setup claude\|codex` | Print the base-URL settings for a harness | 1 |
+| `seeit sessions [--harness --since]` | Recent sessions | 1 |
+| `seeit session <id>` | Turn → call tree with tokens, cache, flags (subagents with F) | 1, then 3 |
+| `seeit calls [--session --kind --flagged]` | Recent calls | 1 |
+| `seeit call <id> [--request --response]` | Timings, usage, completion, flags; stored bodies for debugging (context breakdown with A) | 1, then 2 |
+| `seeit drift` | Unknown event types, usage fields, and invariant flags per harness version | 1 (follow-up 1) |
+| `seeit fixture <call-id\|session-id> -o <file>` | Redacted test fixture from the ledger | 1 (follow-ups 4–5) |
+| `seeit sql "<select>"` | Read-only escape hatch for any other question | 1 |
+| `seeit usage [--by day\|harness\|model] [--since]` | Tokens and estimated USD | 2 |
+| `seeit quota` | Plan-quota use and forecast (C) | 2 |
+| `seeit prices update` | Refresh the pinned price file on purpose (never at runtime) | 2 |
+| `seeit budget [set ...]` | Show or set budgets, and what was blocked | 3 |
+
+**Terms.**
+
+- A *call* is one HTTP request to the model, not a turn. One turn usually has
+  several calls (each tool loop is a new call), and background calls belong to
+  no turn.
+- A *fixture* is test input: a response stream (or, for a scenario, a
+  session's request/response pairs) that is redacted and reviewed by hand
+  before it is committed. `seeit call <id> --response` shows the stored
+  response for debugging and is **not** redacted for the repo. The two are
+  separate commands so debug output is not committed by mistake.
+
+**Decisions.**
+
+- **The CLI reads through the gateway's read API, not the SQLite file.** The
+  gateway will later run on a private server, where the ledger is not on the
+  laptop. The Phase 2 dashboard needs the same API, so both share it. The
+  first CLI commands bring the first read endpoints; the dashboard extends
+  them. Write an ADR for this before building the CLI.
+- **`seeit sql` is the exception.** It opens the local database read-only and
+  is never exposed over the network: raw SQL over HTTP is risk with no benefit.
+- **`seeit fixture` keeps the hand review.** It writes to a file and prints a
+  reminder that the repo is public; it never writes into the test folders
+  itself.
+- **No new dependency for argument parsing.** Use Node's built-in
+  `util.parseArgs`.
+- **Developer tasks stay in the `justfile`** (`just reset`, `just test`). The
+  CLI is for operating and inspecting the gateway, not for working on its
+  code.
+- **Build order:** `calls`, `call`, `sessions`, `session`, `sql` first. They
+  replace `q()` right away. The rest arrive with the phase that adds their
+  data.
+
 ## Stack
 
 TypeScript on Node 24 LTS with Hono ([ADR 0002](adr/0002-typescript-node-hono.md)).
@@ -160,6 +219,7 @@ TypeScript on Node 24 LTS with Hono ([ADR 0002](adr/0002-typescript-node-hono.md
 ```
 apps/gateway      Hono proxy server
 apps/dashboard    Vite + React custom dashboard (Phase 2)
+apps/cli          `seeit` command (see *CLI*)
 packages/core     shared parsers, schema, pricing
 infra/            Docker Compose for Langfuse, launchd plist
 docs/             this plan, ADRs
@@ -336,6 +396,7 @@ it.
 - Pinned price file and estimated USD cost per call (moved from Phase 1).
 - OTel export to Langfuse (Docker Compose).
 - Custom dashboard: A, B, C, E.
+- Extend the gateway read API (started with the CLI) for the dashboard.
 - Quota tracking (C) uses only responses that carry quota headers. Responses
   without them (for example an upstream `429` with no
   `anthropic-ratelimit-unified-*` headers) are skipped, not read as zero.
