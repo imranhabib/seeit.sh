@@ -1,0 +1,19 @@
+{
+  "name": "seeit",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @seeit/gateway dev",
+    "summarize": "pnpm --filter @seeit/gateway summarize",
+    "test": "vitest run",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
