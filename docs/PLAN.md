@@ -361,6 +361,14 @@ it.
      `message_start` and `message_delta` with no server tool use; estimated
      tokens on a `complete` call.
    - Flag the first call from a harness version that has no fixtures.
+   - Label connectivity checks as their own kind (not `background`) with no
+     failure status: a `404` on `HEAD /claude` is harmless (finding 1).
+   - Take `harness_version` only from the harness's own user-agent
+     (`claude-cli/…`; `codex_exec/…` for `codex exec`), never a runtime's
+     (`Bun/…`). For a
+     call without one, leave it null (finding 1).
+   - Store tool count and tools size per harness version, so a version that
+     changes them shows as expected drift, not a bug (finding 3).
    - Fix the Codex gaps found in `codex-rs/codex-api/src/rate_limits.rs`: the
      quota regex misses per-limit headers (`x-codex-<limit>-primary-*`),
      `x-codex-rate-limit-reached-type`, and `x-codex-promo-message`; usage
@@ -381,8 +389,11 @@ it.
    visible thinking. Store each as an ordered list of request/response pairs
    with written expected results (turn IDs, kinds, completion, usage). Extend
    `make-fixture` to redact request bodies (home paths, `account_uuid`,
-   `device_id`, `installation_id`). Decide the subagent rule here (same turn,
-   child turn, or separate), which feeds feature F.
+   `device_id`, `installation_id`; `account_uuid` sits inside
+   `metadata.user_id`, a JSON string). Decide the subagent rule here (same
+   turn, child turn, or separate), which feeds feature F. Also record whether
+   current Claude Code still sends a session-title request in an interactive
+   session (finding 2).
 5. **Flagged calls become fixtures (layer 4).** Let `make-fixture` read a call
    from the ledger by ID (bodies are kept 14 days), so a call flagged in step 1
    can become a reviewed regression test.
@@ -390,6 +401,58 @@ it.
    token rule with a tokenizer count of the received text, as LiteLLM does in
    `_recover_interrupted_stream_output_tokens`. The 4-character rule is rough,
    and code and non-English text tokenize differently from prose.
+
+#### Phase 1 follow-ups: findings from live runs (2026-11-14)
+
+From re-running the Phase 1 "one prompt, one row" check on the laptop
+(`claude -p "Reply with just the word: pong"`), before and after upgrading
+Claude Code from 2.1.133 to 2.1.311 (Homebrew). Each finding names the version
+it was seen on.
+
+1. **Connectivity check.** The path depends on the version: 2.1.133 sends
+   `HEAD /claude` (empty upstream path), which Anthropic answers with `404`;
+   2.1.311 sends `HEAD /api/hello` → `200`. On both versions the request
+   carries the Bun runtime's user-agent (`Bun/1.3.14`, `Bun/1.4.4`) and no
+   session ID. So the ledger stored `upstream_error` for a harmless 404, a
+   runtime version as `harness_version`, and a row that cannot be linked to
+   its session. The fixes are in step 1 above.
+2. **Session-title request.** 2.1.133 sends a Haiku call in parallel with the
+   first turn (17 ms apart) asking for a 3–7 word session title. It has the
+   turn's session ID and no turn ID. Its body has `tools: []`, so it is
+   classified `background` only because the list is **empty**. A side
+   request that ever sends a tool would be counted as a turn. Not seen in two
+   `-p` runs on 2.1.311.
+3. **Tool count depends on the version.** With the same MCP servers and
+   plugins, 2.1.133 sent 133 tools (312,260 characters; prompt ≈ 98k tokens)
+   and 2.1.311 sent 11 (22,620 characters; prompt ≈ 19k tokens). 2.1.311
+   defers MCP tools behind a tool-search tool. Tools can be most of the
+   prompt, so feature A shows them as their own slice.
+4. **Cache break, a worked example for B.** Two 2.1.311 runs 3 minutes apart
+   both wrote the whole prompt to cache (≈ 19.4k cache-write tokens, 0
+   read). Comparing the stored request bodies:
+   - `tools[1]` (Bash) description changed: background timeout "default
+     1800000 ms" → "default 600000 ms". The second run was started from a new
+     terminal tab; the cause (environment, settings, or a server-side flag)
+     is not known.
+   - The skills list in the first user message came in a different order.
+   - `metadata.user_id` differed (session ID). Metadata is not part of the
+     cached prompt.
+
+   The cache key is a prefix in the order **tools → system → messages**, so a
+   one-number change in the second tool invalidates everything after it. The
+   detector (B) therefore: finds the first point where two consecutive
+   requests of the same setup differ, names its section and item (`tools[1]`,
+   Bash), counts the cost (cache-write tokens where a read was expected),
+   and flags text that changes for no reason (an unsorted list) apart from a
+   real config change. It needs request bodies, which the ledger keeps for 14
+   days.
+5. **Several installs per machine.** The laptop has Claude Code 2.1.311
+   (Homebrew, on `PATH`) and 2.1.325 (bundled with the Claude desktop app),
+   and Codex 0.169.0 (Homebrew, on `PATH`; 0.162.0 before upgrading),
+   0.166.0-alpha.6 (bundled with ChatGPT.app), and 0.168.0 / 0.169.0 (the
+   Codex app-server daemon). Only the `PATH` install goes through the gateway
+   in the tutorial commands. Check `which -a claude codex` and `--version` on
+   each machine before comparing ledgers.
 
 ### Phase 2 — Observability
 
