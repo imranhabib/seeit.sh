@@ -81,5 +81,12 @@ critical:
 - Vitest. Tests sit next to the code as `*.test.ts`.
 - Parser tests use recorded SSE fixtures. Feed them in small, odd-sized chunks
   so chunk-boundary bugs show up.
+- Parser coverage follows [ADR 0005](docs/adr/0005-parser-coverage-strategy.md):
+  spec-derived tests link their source; recorded fixtures name the harness
+  version and scenario and come with written expected results; new fixtures
+  are redacted (request bodies too) and reviewed by hand before commit.
+- Keep parsing fail-soft: ignore unknown events, treat every provider field as
+  optional, and flag estimates. A new format must produce "estimated and
+  flagged", never "wrong and silent".
 - Any change to the proxy path must keep the streaming test passing (first
   chunk reaches the client before upstream finishes).

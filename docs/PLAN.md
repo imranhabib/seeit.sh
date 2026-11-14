@@ -249,6 +249,88 @@ the ledger exactly).
 - **Not done yet:** estimated USD cost. It needs the pinned price file (see
   *Prices*), so it moves to Phase 2 together with the dashboard that shows it.
 
+#### Phase 1 follow-ups: gaps from Anthropic's streaming spec
+
+Found by reading [Anthropic's streaming
+docs](https://platform.claude.com/docs/en/build-with-claude/streaming) after
+Phase 1 was built. Gaps 1 and 2 affect cost accuracy, so fix them before the
+Phase 2 cost estimates.
+
+1. **The model can change mid-stream (server-side fallback).** A `fallback`
+   block marks each model boundary, and the final `message_delta` carries the
+   serving model in `input_transformations`. The interpreter takes `model` only
+   from `message_start`, so after a fallback the ledger records the wrong model
+   and cost uses the wrong price. Fix: read the serving model from the final
+   `message_delta` when present. Test with an example built from the docs (a
+   fallback cannot be triggered on demand).
+2. **Server tools change input tokens mid-stream.** In the docs' web-search
+   example, `message_start` reports `input_tokens: 2679` and the final
+   `message_delta` reports `10682`, because search results become input. The
+   cumulative merge already takes the final value for complete streams, but a
+   stream cut before `message_delta` keeps the low first value. Also,
+   `usage.server_tool_use.web_search_requests` is billed per search and is not
+   stored. Fix: store server tool counts in the ledger, and mark input as
+   estimated when a cut stream contained server tool use.
+3. **Some blocks arrive whole, with no deltas**: `redacted_thinking`, server
+   tool results such as `web_search_tool_result`, and `fallback`. The output
+   estimate and `timeToFirstTokenMs` only look at deltas, so these blocks are
+   invisible. Fix: count `content_block_start` content for these block types.
+4. **An empty thinking delta counts as the first token.** With thinking
+   `display: "omitted"`, the stream sends a `thinking_delta` with an empty
+   string, then a `signature_delta`. `timeToFirstTokenMs` is set on that empty
+   delta. Decide the definition (first delta of any kind, or first delta with
+   text) and document it in *Timings per call*.
+5. **Stream recovery may split turns.** For Claude 4.6 and later, the
+   documented way to resume an interrupted stream is a new **user** message
+   ("Your previous response was interrupted ... Continue from where you left
+   off."). If Claude Code does this, the turn tracker starts a turn the user
+   never typed. Record an interrupt-then-resume scenario to see what Claude
+   Code actually sends, then adjust turn detection.
+
+#### Phase 1 follow-ups: parser coverage ([ADR 0005](adr/0005-parser-coverage-strategy.md))
+
+Do these in order. Step 1 protects real usage immediately; the rest build on
+it.
+
+1. **Live drift detection (layer 3).**
+   - Count event types and usage fields the interpreters do not handle, per
+     harness version. Log them and store them on the ledger row.
+   - Check invariants on every call and store violations as flags: `complete`
+     but no usage; `turn` without a turn ID; model in `message_start` differs
+     from the final model with no `fallback` block; input tokens change between
+     `message_start` and `message_delta` with no server tool use; estimated
+     tokens on a `complete` call.
+   - Flag the first call from a harness version that has no fixtures.
+   - Fix the Codex gaps found in `codex-rs/codex-api/src/rate_limits.rs`: the
+     quota regex misses per-limit headers (`x-codex-<limit>-primary-*`),
+     `x-codex-rate-limit-reached-type`, and `x-codex-promo-message`; usage
+     field `codex_rollout_budget_units` is not read.
+2. **Spec-derived tests (layer 1)** for the five streaming gaps above, plus
+   several `message_delta` events and mid-stream errors. Each test links its
+   source (docs page, SDK type, or Codex source file at a pinned commit).
+3. **Typed field access.** Add `@anthropic-ai/sdk` as a dev dependency and type
+   the fields the interpreter reads with its beta types
+   (`BetaRawMessageStreamEvent`, `BetaMessageDeltaUsage`). For Codex, write
+   small local types for the fields read, with links to the matching Codex
+   source. Keep parsing fail-soft: every field optional. A missing usage field
+   stays **unknown (null)**, not 0: `fromAnthropicUsage` / `fromOpenAIUsage`
+   currently default missing fields to 0, which silently asserts "no tokens".
+4. **Risk-ranked scenario recordings (layer 2).** In a throwaway sandbox repo
+   with dummy content, record per harness: long tool loop, subagent,
+   compaction, interrupt-then-resume, a hook that injects context, web search,
+   visible thinking. Store each as an ordered list of request/response pairs
+   with written expected results (turn IDs, kinds, completion, usage). Extend
+   `make-fixture` to redact request bodies (home paths, `account_uuid`,
+   `device_id`, `installation_id`). Decide the subagent rule here (same turn,
+   child turn, or separate), which feeds feature F.
+5. **Flagged calls become fixtures (layer 4).** Let `make-fixture` read a call
+   from the ledger by ID (bodies are kept 14 days), so a call flagged in step 1
+   can become a reviewed regression test.
+6. **Better output estimate for cut streams.** Replace the 4-characters-per-
+   token rule with a tokenizer count of the received text, as LiteLLM does in
+   `_recover_interrupted_stream_output_tokens`. The 4-character rule is rough,
+   and code and non-English text tokenize differently from prose.
+
 ### Phase 2 — Observability
 
 - Pinned price file and estimated USD cost per call (moved from Phase 1).
