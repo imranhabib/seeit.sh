@@ -383,6 +383,9 @@ it.
    source. Keep parsing fail-soft: every field optional. A missing usage field
    stays **unknown (null)**, not 0: `fromAnthropicUsage` / `fromOpenAIUsage`
    currently default missing fields to 0, which silently asserts "no tokens".
+   Also store cache writes split by lifetime (5-minute and 1-hour columns,
+   from `usage.cache_creation`), keeping the total; null when the split is
+   missing. Phase 2 prices each lifetime separately (finding 6).
 4. **Risk-ranked scenario recordings (layer 2).** In a throwaway sandbox repo
    with dummy content, record per harness: long tool loop, subagent,
    compaction, interrupt-then-resume, a hook that injects context, web search,
@@ -390,7 +393,9 @@ it.
    with written expected results (turn IDs, kinds, completion, usage). Extend
    `make-fixture` to redact request bodies (home paths, `account_uuid`,
    `device_id`, `installation_id`; `account_uuid` sits inside
-   `metadata.user_id`, a JSON string). Decide the subagent rule here (same
+   `metadata.user_id`, a JSON string; Claude Code's git status block in the
+   first user message, which holds the git user name, branch names, and
+   recent commit messages). Decide the subagent rule here (same
    turn, child turn, or separate), which feeds feature F. Also record whether
    current Claude Code still sends a session-title request in an interactive
    session (finding 2).
@@ -446,6 +451,21 @@ it was seen on.
    and flags text that changes for no reason (an unsorted list) apart from a
    real config change. It needs request bodies, which the ledger keeps for 14
    days.
+
+   A second break shows that **where** the change lands decides the cost.
+   A later 2.1.311 run read only 10,474 tokens and wrote 8,916. The only
+   change was the git status snapshot that Claude Code puts in the first
+   user message (`(clean)` → `M docs/PLAN.md`, a file edited between runs).
+   Cache hits are checked only at `cache_control` breakpoints; this request
+   had three: `system[1]`, `system[2]` (end of tools + system ≈ 10.5k tokens),
+   and `messages[1]`. The change came after the second, so tools and system
+   were read and everything from the first message on was written again. The
+   Bash timeout change came before the first breakpoint, so nothing was read.
+   The detector reports the break point relative to the breakpoints ("broke
+   at `messages[0]`, after `system[2]`; 8.9k tokens written again"). Any git
+   change between sessions (edit, commit, branch switch) causes this break on
+   a session's first call; within a session the snapshot is fixed. Treat it
+   as an **expected** break, not a problem.
 5. **Several installs per machine.** The laptop has Claude Code 2.1.311
    (Homebrew, on `PATH`) and 2.1.325 (bundled with the Claude desktop app),
    and Codex 0.169.0 (Homebrew, on `PATH`; 0.162.0 before upgrading),
@@ -453,10 +473,23 @@ it was seen on.
    Codex app-server daemon). Only the `PATH` install goes through the gateway
    in the tutorial commands. Check `which -a claude codex` and `--version` on
    each machine before comparing ledgers.
+6. **The cache outlives sessions, and has two lifetimes.** The prompt cache
+   is keyed on the exact prompt prefix within the account, not on the
+   session: separate `claude -p` runs (new session IDs) read each other's
+   cache. Session IDs sit in `metadata`, which is not part of the cached
+   prompt. Claude Code 2.1.311 marks every breakpoint
+   `{"type": "ephemeral", "ttl": "1h"}`, so a prefix lives 1 hour after its
+   last hit (the API default is 5 minutes). The response splits cache writes
+   by lifetime (`usage.cache_creation.ephemeral_5m_input_tokens` /
+   `ephemeral_1h_input_tokens`), and a 1-hour write is billed at a higher
+   rate than a 5-minute one. The ledger stores only the total
+   (`cache_write_tokens`), so Phase 2 cost would underprice every Claude Code
+   cache write. Fix in step 3 above.
 
 ### Phase 2 — Observability
 
 - Pinned price file and estimated USD cost per call (moved from Phase 1).
+  Price 5-minute and 1-hour cache writes separately (live finding 6).
 - OTel export to Langfuse (Docker Compose).
 - Custom dashboard: A, B, C, E.
 - Extend the gateway read API (started with the CLI) for the dashboard.
