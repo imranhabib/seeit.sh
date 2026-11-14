@@ -34,9 +34,14 @@ pnpm test             # run all tests (Vitest)
 pnpm typecheck        # tsc --noEmit for all packages
 pnpm dev              # run the gateway on 127.0.0.1:8787
 pnpm summarize        # summarize recordings in data/recordings
+pnpm --filter @seeit/gateway db:generate   # new SQL migration after a schema change
 ```
 
 Run `pnpm typecheck` and `pnpm test` before you say a change is done.
+
+The ledger schema is `apps/gateway/src/db/schema.ts`. After changing it, run
+`db:generate` and commit the new file in `apps/gateway/drizzle/`. Never edit a
+migration that is already committed; add a new one.
 
 ## Hot path rules (do not break these)
 

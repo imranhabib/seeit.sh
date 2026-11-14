@@ -29,26 +29,8 @@ export type Recording = {
   };
 };
 
-/** Read the recorder's branch of the response to the end. */
-export async function readBranch(stream: ReadableStream<Uint8Array>, start: number) {
-  const decoder = new TextDecoder();
-  let text = "";
-  let timeToFirstChunkMs: number | null = null;
-  let aborted = false;
-  try {
-    for await (const chunk of stream) {
-      timeToFirstChunkMs ??= performance.now() - start;
-      text += decoder.decode(chunk, { stream: true });
-    }
-    text += decoder.decode();
-  } catch {
-    aborted = true;
-  }
-  return { text, timeToFirstChunkMs, aborted };
-}
-
-/** Request bodies are forwarded raw, so they may be compressed. Decode for the recording only. */
-export function decodeRequestBody(raw: ArrayBuffer, encoding: string | null): unknown {
+/** Request bodies are forwarded raw, so they may be compressed. Decode them for analysis and storage. */
+export function decodeRequestText(raw: ArrayBuffer, encoding: string | null): string | null {
   if (raw.byteLength === 0) return null;
   let buf = Buffer.from(raw);
   try {
@@ -59,7 +41,7 @@ export function decodeRequestBody(raw: ArrayBuffer, encoding: string | null): un
   } catch {
     return `[could not decode ${encoding} body, ${raw.byteLength} bytes]`;
   }
-  return parseJsonOrText(buf.toString("utf8"));
+  return buf.toString("utf8");
 }
 
 export function parseResponseBody(text: string, contentType: string | null): Partial<Recording["response"]> {

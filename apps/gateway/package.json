@@ -5,14 +5,19 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "summarize": "tsx scripts/summarize.ts",
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p .",
+    "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.8",
     "@seeit/core": "workspace:*",
+    "better-sqlite3": "^13.1.1",
+    "drizzle-orm": "^0.45.4",
     "hono": "^4.13.18"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "drizzle-kit": "^0.31.11",
     "tsx": "^4.23.15"
   }
 }

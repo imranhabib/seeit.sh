@@ -1,3 +1,7 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+# Only packages listed here may run install scripts.
+allowBuilds:
+  better-sqlite3: true # downloads or compiles the native SQLite binding

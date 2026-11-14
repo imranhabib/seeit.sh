@@ -2,22 +2,39 @@
 //
 //   harness ──request──▶ gateway ──same bytes──▶ upstream
 //   harness ◀──chunk by chunk── tee ◀──stream── upstream
-//                                └──copy──▶ recorder (after the stream ends: write JSON file)
+//                                └──copy──▶ observe (parse events, usage, timings)
+//                                             └─▶ ledger row + gzipped bodies (+ JSON recording)
+//
+// Everything after the tee runs in the background. The hot path is only:
+// read request bytes → fetch → tee → return the client stream.
 
 import { randomUUID } from "node:crypto";
+import { decideCompletion, estimateTokens, readRequest, type Harness, type RequestInfo, type Usage } from "@seeit/core";
 import { Hono } from "hono";
 import type { Config } from "./config.ts";
+import type { Ledger } from "./db/ledger.ts";
+import type { CallRow } from "./db/schema.ts";
+import { observeResponse, quotaHeaders, usageFromJsonBody } from "./observe.ts";
+import { decodeRequestText, parseResponseBody, writeRecording } from "./recorder.ts";
 import { redactHeaders } from "./redact.ts";
-import { decodeRequestBody, parseResponseBody, readBranch, writeRecording } from "./recorder.ts";
+import { createTurnTracker } from "./turns.ts";
 
 // Hop-by-hop headers belong to one connection and must not be forwarded.
 const HOP_BY_HOP = ["connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization", "proxy-connection"];
 
-export function createApp(config: Config, hooks: { onRecorded?: (file: string) => void } = {}) {
+type Hooks = {
+  /** Called after a call's ledger row is written. */
+  onCall?: (row: CallRow) => void;
+  /** Called after a JSON recording is written. */
+  onRecorded?: (file: string) => void;
+};
+
+export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}) {
   const app = new Hono();
+  const turns = createTurnTracker();
 
   app.all("/:harness/*", async (c) => {
-    const harness = c.req.param("harness");
+    const harness = c.req.param("harness") as Harness;
     const upstreamBase = config.upstreams[harness];
     if (!upstreamBase) return c.json({ error: `unknown harness "${harness}"` }, 404);
 
@@ -28,7 +45,6 @@ export function createApp(config: Config, hooks: { onRecorded?: (file: string) =
     // "/claude/v1/messages?beta=true" -> "https://api.anthropic.com/v1/messages?beta=true"
     const url = new URL(c.req.url);
     const path = url.pathname.slice(harness.length + 1) + url.search;
-    const target = upstreamBase + path;
 
     const reqHeaders = new Headers(c.req.raw.headers);
     for (const h of [...HOP_BY_HOP, "host", "content-length"]) reqHeaders.delete(h);
@@ -38,12 +54,13 @@ export function createApp(config: Config, hooks: { onRecorded?: (file: string) =
 
     const method = c.req.method;
     // The request body is small compared with the response, and we need it for
-    // the recording, so reading it fully here is fine.
+    // analysis, so reading it fully here is fine.
     const reqBody = method === "GET" || method === "HEAD" ? undefined : await c.req.arrayBuffer();
 
-    let upstream: Response;
+    let upstream: Response | null = null;
+    let fetchError: unknown = null;
     try {
-      upstream = await fetch(target, {
+      upstream = await fetch(upstreamBase + path, {
         method,
         headers: reqHeaders,
         body: reqBody,
@@ -52,44 +69,165 @@ export function createApp(config: Config, hooks: { onRecorded?: (file: string) =
         signal: c.req.raw.signal,
       });
     } catch (err) {
-      console.error(`[${harness}] upstream request failed:`, err);
-      return c.json({ error: "upstream request failed" }, 502);
+      fetchError = err;
     }
     const timeToResponseHeadersMs = performance.now() - start;
 
-    const resHeaders = new Headers(upstream.headers);
-    // fetch already decompressed the body, so these headers would now be wrong.
-    for (const h of [...HOP_BY_HOP, "content-encoding", "content-length"]) resHeaders.delete(h);
+    const [toClient, toObserver] = upstream?.body ? upstream.body.tee() : [null, null];
 
-    const [toClient, toRecorder] = upstream.body ? upstream.body.tee() : [null, null];
-
-    // Not awaited: recording must never delay the response.
+    // Not awaited: analysis and storage must never delay the response.
     void (async () => {
-      const branch = toRecorder ? await readBranch(toRecorder, start) : { text: "", timeToFirstChunkMs: null, aborted: false };
+      // Yield first, so request parsing happens after the response has started.
+      // setImmediate callbacks run in the order they were scheduled, so the
+      // turn tracker still sees calls in request order.
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const requestText = reqBody ? decodeRequestText(reqBody, c.req.header("content-encoding") ?? null) : null;
+      const info = readRequest(harness, { method, path, headers: c.req.raw.headers, body: parseJson(requestText) });
+      const turnId = turns.turnFor(info);
+      const base = { id, startedAt, harness, method, path, info, turnId, timeToResponseHeadersMs };
+
+      let row: CallRow;
+      let responseText: string | null = null;
+      try {
+        const observed = await observeResponse(toObserver, harness, upstream?.headers.get("content-type") ?? null, start);
+        responseText = observed.text || null;
+        const s = observed.summary;
+        const completion = decideCompletion({
+          status: upstream?.status ?? null,
+          isStream: observed.isStream,
+          final: s.final,
+          errorType: s.errorType,
+          clientAborted: c.req.raw.signal.aborted,
+          readFailed: observed.readFailed,
+          gatewayFailed: false,
+        });
+        const usage =
+          s.usage ??
+          (observed.isStream ? null : usageFromJsonBody(harness, observed.text)) ??
+          estimateUnreported(info, requestText, s.outputChars, completion);
+
+        row = {
+          ...callRow(base),
+          httpStatus: upstream?.status ?? null,
+          completion,
+          errorType: s.errorType,
+          model: s.model ?? info.model,
+          ...usageColumns(usage),
+          timeToFirstChunkMs: observed.timeToFirstChunkMs,
+          timeToFirstTokenMs: s.timeToFirstTokenMs,
+          timeToStreamEndMs: observed.timeToStreamEndMs,
+          quota: upstream ? quotaHeaders(upstream.headers) : null,
+        };
+      } catch (err) {
+        console.error(`[${harness}] analysis failed:`, err);
+        row = { ...callRow(base), httpStatus: upstream?.status ?? null, completion: "gateway_error", ...usageColumns(null) };
+      }
+
+      await ledger.record(row, { request: requestText, response: responseText });
+      log(row);
+      hooks.onCall?.(row);
+
       const file = await writeRecording(config.recordDir, {
         id,
         harness,
         startedAt,
-        timings: { timeToResponseHeadersMs, timeToFirstChunkMs: branch.timeToFirstChunkMs, timeToStreamEndMs: performance.now() - start },
-        aborted: branch.aborted,
-        request: {
-          method,
-          path,
-          headers: redactHeaders(c.req.raw.headers),
-          body: reqBody ? decodeRequestBody(reqBody, c.req.header("content-encoding") ?? null) : null,
+        timings: {
+          timeToResponseHeadersMs,
+          timeToFirstChunkMs: row.timeToFirstChunkMs ?? null,
+          timeToStreamEndMs: row.timeToStreamEndMs ?? performance.now() - start,
         },
+        aborted: row.completion !== "complete",
+        request: { method, path, headers: redactHeaders(c.req.raw.headers), body: parseJson(requestText) ?? requestText },
         response: {
-          status: upstream.status,
-          headers: redactHeaders(upstream.headers),
-          ...parseResponseBody(branch.text, upstream.headers.get("content-type")),
+          status: upstream?.status ?? 0,
+          headers: upstream ? redactHeaders(upstream.headers) : {},
+          ...parseResponseBody(responseText ?? "", upstream?.headers.get("content-type") ?? null),
         },
       });
-      console.log(`[${harness}] ${method} ${path} -> ${upstream.status} (${Math.round(performance.now() - start)} ms)`);
       hooks.onRecorded?.(file);
     })().catch((err) => console.error(`[${harness}] recording failed:`, err));
 
-      return new Response(toClient, { status: upstream.status, headers: resHeaders });
+    if (!upstream) {
+      if (!c.req.raw.signal.aborted) console.error(`[${harness}] upstream request failed:`, fetchError);
+      return c.json({ error: "upstream request failed" }, 502);
+    }
+
+    const resHeaders = new Headers(upstream.headers);
+    // fetch already decompressed the body, so these headers would now be wrong.
+    for (const h of [...HOP_BY_HOP, "content-encoding", "content-length"]) resHeaders.delete(h);
+    return new Response(toClient, { status: upstream.status, headers: resHeaders });
   });
 
   return app;
+}
+
+function callRow(b: {
+  id: string;
+  startedAt: string;
+  harness: Harness;
+  method: string;
+  path: string;
+  info: RequestInfo;
+  turnId: string | null;
+  timeToResponseHeadersMs: number;
+}): Omit<CallRow, "completion" | "tokensEstimated"> {
+  return {
+    id: b.id,
+    startedAt: b.startedAt,
+    harness: b.harness,
+    harnessVersion: b.info.harnessVersion,
+    sessionId: b.info.sessionId,
+    turnId: b.turnId,
+    kind: b.info.kind,
+    method: b.method,
+    path: b.path,
+    model: b.info.model,
+    timeToResponseHeadersMs: b.timeToResponseHeadersMs,
+    toolsCount: b.info.context.toolsCount,
+    toolsChars: b.info.context.toolsChars,
+    instructionsChars: b.info.context.instructionsChars,
+  };
+}
+
+// A model call that never reported usage (for example a Codex stream cut
+// before response.completed) still cost tokens. Estimate both sides.
+function estimateUnreported(info: RequestInfo, requestText: string | null, outputChars: number, completion: string): Usage | null {
+  if (info.kind !== "turn" || completion === "complete" || !requestText) return null;
+  return {
+    inputTokens: estimateTokens(requestText.length),
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: estimateTokens(outputChars),
+    reasoningTokens: 0,
+    estimated: true,
+  };
+}
+
+function usageColumns(u: Usage | null) {
+  return {
+    inputTokens: u?.inputTokens ?? null,
+    cacheReadTokens: u?.cacheReadTokens ?? null,
+    cacheWriteTokens: u?.cacheWriteTokens ?? null,
+    outputTokens: u?.outputTokens ?? null,
+    reasoningTokens: u?.reasoningTokens ?? null,
+    tokensEstimated: u?.estimated ?? false,
+  };
+}
+
+function log(r: CallRow) {
+  const tokens =
+    r.inputTokens === null
+      ? ""
+      : ` in=${r.inputTokens} cache_read=${r.cacheReadTokens} cache_write=${r.cacheWriteTokens} out=${r.outputTokens}${r.tokensEstimated ? " (est.)" : ""}`;
+  console.log(`[${r.harness}] ${r.method} ${r.path} -> ${r.httpStatus ?? "-"} ${r.completion} ${r.kind}${tokens} (${Math.round(r.timeToStreamEndMs ?? 0)} ms)`);
+}
+
+function parseJson(text: string | null): unknown {
+  if (text === null) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
