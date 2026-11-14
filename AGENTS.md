@@ -34,9 +34,14 @@ pnpm test             # run all tests (Vitest)
 pnpm typecheck        # tsc --noEmit for all packages
 pnpm dev              # run the gateway on 127.0.0.1:8787
 pnpm summarize        # summarize recordings in data/recordings
+pnpm --filter @seeit/gateway db:generate   # new SQL migration after a schema change
 ```
 
 Run `pnpm typecheck` and `pnpm test` before you say a change is done.
+
+The ledger schema is `apps/gateway/src/db/schema.ts`. After changing it, run
+`db:generate` and commit the new file in `apps/gateway/drizzle/`. Never edit a
+migration that is already committed; add a new one.
 
 ## Hot path rules (do not break these)
 
@@ -76,5 +81,12 @@ critical:
 - Vitest. Tests sit next to the code as `*.test.ts`.
 - Parser tests use recorded SSE fixtures. Feed them in small, odd-sized chunks
   so chunk-boundary bugs show up.
+- Parser coverage follows [ADR 0005](docs/adr/0005-parser-coverage-strategy.md):
+  spec-derived tests link their source; recorded fixtures name the harness
+  version and scenario and come with written expected results; new fixtures
+  are redacted (request bodies too) and reviewed by hand before commit.
+- Keep parsing fail-soft: ignore unknown events, treat every provider field as
+  optional, and flag estimates. A new format must produce "estimated and
+  flagged", never "wrong and silent".
 - Any change to the proxy path must keep the streaming test passing (first
   chunk reaches the client before upstream finishes).
