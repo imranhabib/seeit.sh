@@ -9,7 +9,7 @@
 // read request bytes → fetch → tee → return the client stream.
 
 import { randomUUID } from "node:crypto";
-import { decideCompletion, estimateTokens, readRequest, type Harness, type RequestInfo, type Usage } from "@seeit/core";
+import { decideCompletion, estimateTokens, readRequest, type Harness, type RequestInfo, type StreamSummary, type Usage } from "@seeit/core";
 import { Hono } from "hono";
 import type { Config } from "./config.ts";
 import type { Ledger } from "./db/ledger.ts";
@@ -91,10 +91,12 @@ export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}) {
 
       let row: CallRow;
       let responseText: string | null = null;
+      // What the response stream showed; stays null if analysis failed.
+      let stream: StreamSummary | null = null;
       try {
         const observed = await observeResponse(toObserver, harness, upstream?.headers.get("content-type") ?? null, start);
         responseText = observed.text || null;
-        const s = observed.summary;
+        const s = (stream = observed.summary);
         const completion = decideCompletion({
           status: upstream?.status ?? null,
           isStream: observed.isStream,
@@ -121,6 +123,7 @@ export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}) {
           timeToFirstTokenMs: s.timeToFirstTokenMs,
           timeToStreamEndMs: observed.timeToStreamEndMs,
           quota: upstream ? quotaHeaders(upstream.headers) : null,
+          serverToolUse: s.serverToolUse ? JSON.stringify(s.serverToolUse) : null,
           unknownEvents: JSON.stringify(s.unknownEvents),
           unknownUsageFields: JSON.stringify(s.unknownUsageFields),
         };
@@ -131,7 +134,7 @@ export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}) {
 
       // Invariant flags. The version check reads the ledger, so it runs
       // before this row is written.
-      const flags = callFlags(row);
+      const flags = callFlags(row, stream);
       if (isFirstUntested(row.harnessVersion)) flags.push("untested_harness_version");
       row.flags = JSON.stringify(flags);
 

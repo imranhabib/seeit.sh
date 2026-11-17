@@ -102,6 +102,207 @@ describe("openai responses interpreter", () => {
   });
 });
 
+// --- Spec-derived tests (ADR 0005, layer 1; PLAN.md follow-up step 2) ---------
+// Built from documented examples, one event every 10 ms, so a test can say
+// exactly which event set a timing.
+
+/** Turn objects into SSE text and run them; event i arrives at (i + 1) * 10 ms. */
+function runEvents(provider: Provider, events: object[]): StreamSummary {
+  const parser = createSseParser();
+  const interpreter = createInterpreter(provider);
+  events.forEach((e, i) => {
+    const type = (e as { type: string }).type;
+    for (const ev of parser.push(`event: ${type}\ndata: ${JSON.stringify(e)}\n\n`)) interpreter.onEvent(ev, (i + 1) * 10);
+  });
+  for (const ev of parser.flush()) interpreter.onEvent(ev, events.length * 10);
+  return interpreter.summary();
+}
+
+const textDelta = (index: number, text: string) => ({ type: "content_block_delta", index, delta: { type: "text_delta", text } });
+const blockStart = (index: number, content_block: object) => ({ type: "content_block_start", index, content_block });
+const blockStop = (index: number) => ({ type: "content_block_stop", index });
+const messageStart = (model: string, usage: object) => ({ type: "message_start", message: { model, content: [], usage } });
+
+// Source: https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback
+// ("Server-side fallback": "What the response contains" and "Streaming").
+describe("spec: server-side fallback (gap 1)", () => {
+  const fallbackBlock = { type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-4-8" }, trigger: { type: "refusal", category: "cyber" } };
+  const midOutput = [
+    messageStart("claude-fable-5", { input_tokens: 535, output_tokens: 1 }),
+    blockStart(0, { type: "text", text: "" }),
+    textDelta(0, "Partial answer"),
+    blockStop(0),
+    blockStart(1, fallbackBlock), // arrives whole: start + stop, no deltas
+    blockStop(1),
+    blockStart(2, { type: "text", text: "" }),
+    textDelta(2, "Hi! How can I help you today?"),
+    blockStop(2),
+    {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: {
+        input_tokens: 412,
+        output_tokens: 264,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        iterations: [
+          { type: "message", model: "claude-fable-5", input_tokens: 535, output_tokens: 3, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+          { type: "fallback_message", model: "claude-opus-4-8", input_tokens: 412, output_tokens: 264, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        ],
+      },
+    },
+    { type: "message_stop" },
+  ];
+
+  it("takes the serving model from the fallback, not from message_start", () => {
+    const s = runEvents("anthropic", midOutput);
+    expect(s).toMatchObject({ startModel: "claude-fable-5", model: "claude-opus-4-8", fallback: true, final: true });
+    // Top-level usage describes only the serving attempt (the docs: "Tokens from different models are never summed").
+    expect(s.usage).toMatchObject({ inputTokens: 412, outputTokens: 264 });
+  });
+
+  it("knows the serving model from the fallback block even if the stream is cut before message_delta", () => {
+    const s = runEvents("anthropic", midOutput.slice(0, 8));
+    expect(s).toMatchObject({ model: "claude-opus-4-8", fallback: true, final: false });
+  });
+
+  it("has no fallback for a normal stream", () => {
+    expect(run("anthropic", CLAUDE)).toMatchObject({ startModel: "claude-opus-5-5", model: "claude-opus-5-5", fallback: false });
+  });
+});
+
+// Source: https://platform.claude.com/docs/en/build-with-claude/streaming
+// ("Streaming request with web search tool use"; result content shortened).
+describe("spec: server tools change input mid-stream (gaps 2 and 3)", () => {
+  const webSearch = [
+    messageStart("claude-opus-5-5", { input_tokens: 2679, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 3 }),
+    blockStart(0, { type: "text", text: "" }),
+    textDelta(0, "I'll check"),
+    blockStop(0),
+    blockStart(1, { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: {} }),
+    { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "" } },
+    { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"query": "weather NYC today"}' } },
+    blockStop(1),
+    blockStart(2, { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [{ type: "web_search_result", title: "Weather in New York City", url: "https://example.com", encrypted_content: "x".repeat(500) }] }),
+    blockStop(2),
+    blockStart(3, { type: "text", text: "" }),
+    textDelta(3, "Here's the current weather"),
+    blockStop(3),
+    {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn", stop_sequence: null },
+      usage: { input_tokens: 10682, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 510, server_tool_use: { web_search_requests: 1 } },
+    },
+    { type: "message_stop" },
+  ];
+
+  it("takes the final input count and keeps the server tool counts", () => {
+    const s = runEvents("anthropic", webSearch);
+    expect(s.startInputTokens).toBe(2679);
+    expect(s.usage).toMatchObject({ inputTokens: 10682, outputTokens: 510, estimated: false });
+    expect(s.serverToolUse).toEqual({ web_search_requests: 1 });
+    expect(s.serverToolSeen).toBe(true);
+  });
+
+  it("does not count search results as model output (they become input)", () => {
+    const s = runEvents("anthropic", webSearch);
+    const modelText = "I'll check" + '{"query": "weather NYC today"}' + "Here's the current weather";
+    expect(s.outputChars).toBe(modelText.length);
+  });
+
+  it("marks a stream cut after a search as estimated, with the low first input count", () => {
+    const s = runEvents("anthropic", webSearch.slice(0, 11));
+    expect(s.final).toBe(false);
+    expect(s.serverToolSeen).toBe(true);
+    expect(s.usage).toMatchObject({ inputTokens: 2679, estimated: true });
+  });
+});
+
+// Source: https://platform.claude.com/docs/en/build-with-claude/streaming ("Event types", "Thinking delta").
+describe("spec: first token (gaps 3 and 4)", () => {
+  it("counts a redacted_thinking block, which arrives whole, as the first output", () => {
+    const s = runEvents("anthropic", [
+      messageStart("claude-opus-5-5", { input_tokens: 10, output_tokens: 1 }),
+      blockStart(0, { type: "redacted_thinking", data: "EmwKAhgBEgy3va3pzix/LafPsn4a" }),
+      blockStop(0),
+      blockStart(1, { type: "text", text: "" }),
+      textDelta(1, "Answer"),
+    ]);
+    expect(s.timeToFirstTokenMs).toBe(20);
+    // Encrypted data is not text the model wrote, so it is not counted as output characters.
+    expect(s.outputChars).toBe("Answer".length);
+  });
+
+  it('ignores the empty thinking delta and the signature with display: "omitted"', () => {
+    const s = runEvents("anthropic", [
+      messageStart("claude-opus-5-5", { input_tokens: 10, output_tokens: 1 }),
+      blockStart(0, { type: "thinking", thinking: "", signature: "" }),
+      { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "EqQBCgIYAhIM1gbcDa9GJwZA2b3hGgxBdjrkzLoky3dl1pkiMOYds" } },
+      blockStop(0),
+      blockStart(1, { type: "text", text: "" }),
+      textDelta(1, "Answer"),
+    ]);
+    expect(s.timeToFirstTokenMs).toBe(70);
+  });
+
+  it("ignores an empty input_json_delta (sent first for every tool call)", () => {
+    const s = runEvents("anthropic", [
+      messageStart("claude-opus-5-5", { input_tokens: 10, output_tokens: 1 }),
+      blockStart(0, { type: "tool_use", id: "toolu_1", name: "get_weather", input: {} }),
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"location"' } },
+    ]);
+    expect(s.timeToFirstTokenMs).toBe(40);
+  });
+});
+
+// Source: https://platform.claude.com/docs/en/build-with-claude/streaming
+// ("One or more message_delta events"; "token counts ... are cumulative").
+describe("spec: several message_delta events", () => {
+  it("keeps the last cumulative counts and earlier fields a later delta omits", () => {
+    const s = runEvents("anthropic", [
+      messageStart("claude-opus-5-5", { input_tokens: 10, cache_read_input_tokens: 900, output_tokens: 1 }),
+      textDelta(0, "Hello"),
+      { type: "message_delta", delta: {}, usage: { output_tokens: 5 } },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 12 } },
+      { type: "message_stop" },
+    ]);
+    expect(s.usage).toMatchObject({ inputTokens: 10, cacheReadTokens: 900, outputTokens: 12, estimated: false });
+  });
+});
+
+// Sources: OpenAI Node SDK stream event types, src/resources/responses/responses.ts at
+// openai/openai-node@4517ca801b79a93ccc17826b0b63ba2313355307; Codex's parser,
+// codex-rs/codex-api/src/sse/responses.rs at openai/codex@9537934ed6d5a6658fc77032b3290650765466a1.
+describe("spec: OpenAI Responses output and errors", () => {
+  const created = { type: "response.created", response: { model: "gpt-6.1-sol" } };
+
+  it("counts only model-output deltas, and not empty ones", () => {
+    const s = runEvents("openai-responses", [
+      created,
+      // Output of a shell command the server ran: tool output, not model output.
+      { type: "response.shell_call_output_content.delta", item_id: "sh_1", output_index: 0, command_index: 0, delta: { stdout: "file.txt\n" } },
+      { type: "response.reasoning_summary_text.delta", item_id: "rs_1", output_index: 0, summary_index: 0, delta: "" },
+      { type: "response.output_text.delta", item_id: "msg_1", output_index: 1, content_index: 0, delta: "pong" },
+    ]);
+    expect(s.timeToFirstTokenMs).toBe(40);
+    expect(s.outputChars).toBe("pong".length);
+  });
+
+  it("records the model from response.created and from response.completed", () => {
+    const s = runEvents("openai-responses", [created, { type: "response.completed", response: { model: "gpt-6.1-other", usage: { input_tokens: 10, output_tokens: 1 } } }]);
+    expect(s).toMatchObject({ startModel: "gpt-6.1-sol", model: "gpt-6.1-other", fallback: false });
+  });
+
+  it("reads the error code from an error event and from response.failed", () => {
+    expect(runEvents("openai-responses", [created, { type: "error", code: "server_error", message: "boom", param: null, sequence_number: 1 }]).errorType).toBe("server_error");
+    expect(
+      runEvents("openai-responses", [created, { type: "response.failed", response: { status: "failed", error: { code: "rate_limit_exceeded", message: "..." }, usage: null } }]).errorType,
+    ).toBe("rate_limit_exceeded");
+  });
+});
+
 // Drift detection (ADR 0005, layer 3; PLAN.md follow-up step 1).
 describe("unknown events and usage fields", () => {
   it.each([

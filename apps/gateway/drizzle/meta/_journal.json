@@ -22,6 +22,13 @@
       "when": 1794883035392,
       "tag": "0002_old_network",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794885255830,
+      "tag": "0003_stale_white_tiger",
+      "breakpoints": true
     }
   ]
 }
