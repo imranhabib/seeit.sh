@@ -15,7 +15,7 @@ import type { Config } from "./config.ts";
 import type { Ledger } from "./db/ledger.ts";
 import type { CallRow } from "./db/schema.ts";
 import { observeResponse, quotaHeaders, usageFromJsonBody } from "./observe.ts";
-import { createReadApi } from "./read-api.ts";
+import { createLedgerApi } from "./ledger-api.ts";
 import { decodeRequestText, parseResponseBody, writeRecording } from "./recorder.ts";
 import { redactHeaders } from "./redact.ts";
 import { createTurnTracker } from "./turns.ts";
@@ -34,7 +34,7 @@ export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}) {
   const app = new Hono();
   const turns = createTurnTracker();
 
-  app.route("/api", createReadApi(ledger));
+  app.route("/api", createLedgerApi(ledger));
 
   app.all("/:harness/*", async (c) => {
     const harness = c.req.param("harness") as Harness;

@@ -35,7 +35,7 @@ const callFields = {
 export type CallMetadata = Pick<typeof calls.$inferSelect, keyof typeof callFields>;
 export type CallList = { calls: CallMetadata[]; nextOffset: number | null };
 
-export function createReadApi(ledger: Ledger) {
+export function createLedgerApi(ledger: Ledger) {
   const api = new Hono();
 
   api.onError((_err, c) => {

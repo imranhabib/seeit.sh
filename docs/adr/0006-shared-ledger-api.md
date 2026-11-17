@@ -1,4 +1,4 @@
-# 0006 — Shared read API for the dashboard and CLI
+# 0006 — Shared ledger API for the dashboard and CLI
 
 **Status:** accepted
 
@@ -25,7 +25,7 @@ from the first endpoints; evidence and normalized quota need separate views.
 ## Consequences
 
 - Start with call list and detail; add session and aggregate views in later,
-  separately reviewable changes. See [the API contract](../read-api.md).
+  separately reviewable changes. See [the API contract](../ledger-api.md).
 - Unknown values remain null; estimates retain their flags. The API reflects
   ledger values and does not repair existing parser limitations.
 - Lists use offset pagination for now. Order by start time and ID to break

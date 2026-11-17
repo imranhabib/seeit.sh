@@ -1,4 +1,4 @@
-# Read API: first slice
+# Ledger API: first slice
 
 The gateway serves JSON metadata at `http://127.0.0.1:8787/api` by default.
 Only completed recording writes are visible; this is not an in-flight feed.
@@ -63,13 +63,13 @@ or SQL endpoint, and no new authentication mechanism in this local-only slice.
 
 ## Walkthrough and local checks
 
-1. `apps/gateway/src/read-api.ts` owns the routes and explicit metadata
+1. `apps/gateway/src/ledger-api.ts` owns the routes and explicit metadata
    selection. The queries read the existing calls table through Drizzle.
    Fetching one extra row determines whether another page exists without
    counting the entire table.
-2. `apps/gateway/src/app.ts` mounts `/api` before `/:harness/*`. The read API's
+2. `apps/gateway/src/app.ts` mounts `/api` before `/:harness/*`. The ledger API's
    final catch-all keeps unknown routes and write methods out of the proxy.
-3. `apps/gateway/src/read-api.test.ts` seeds synthetic rows in an in-memory
+3. `apps/gateway/src/ledger-api.test.ts` seeds synthetic rows in an in-memory
    ledger and exercises the actual app routes. Nothing reads personal data.
 
 Run from the implementation worktree:
@@ -77,7 +77,7 @@ Run from the implementation worktree:
 ```bash
 pnpm typecheck
 pnpm test
-pnpm exec vitest run apps/gateway/src/read-api.test.ts
+pnpm exec vitest run apps/gateway/src/ledger-api.test.ts
 ```
 
 To try HTTP without touching a live gateway or its database, start a separate

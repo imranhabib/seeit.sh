@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.ts";
 import { openLedger, type Ledger } from "./db/ledger.ts";
 import { calls, type CallRow } from "./db/schema.ts";
-import type { CallList } from "./read-api.ts";
+import type { CallList } from "./ledger-api.ts";
 
 let ledger: Ledger;
 let app: ReturnType<typeof createApp>;
@@ -45,7 +45,7 @@ afterEach(() => {
   ledger.close();
 });
 
-describe("read API", () => {
+describe("ledger API", () => {
   it("returns an empty list rather than inventing usage", async () => {
     const res = await app.request("/api/calls");
     expect(res.status).toBe(200);
