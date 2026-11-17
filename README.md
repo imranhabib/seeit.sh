@@ -58,6 +58,9 @@ sqlite3 -header -column data/seeit.db "select started_at, harness, kind, complet
 Raw JSON recordings of each call are also written to `data/recordings/`
 (git-ignored). Summarize them with `pnpm summarize`.
 
+The [read API](docs/read-api.md) lists calls and shows call metadata over HTTP,
+without opening SQLite directly. It is the first step toward the dashboard.
+
 ## Layout
 
 ```
