@@ -9,11 +9,12 @@
 // read request bytes → fetch → tee → return the client stream.
 
 import { randomUUID } from "node:crypto";
-import { decideCompletion, estimateTokens, readRequest, type Harness, type RequestInfo, type Usage } from "@seeit/core";
+import { decideCompletion, estimateTokens, readRequest, type Harness, type RequestInfo, type StreamSummary, type Usage } from "@seeit/core";
 import { Hono } from "hono";
 import type { Config } from "./config.ts";
 import type { Ledger } from "./db/ledger.ts";
 import type { CallRow } from "./db/schema.ts";
+import { callFlags, createVersionCheck } from "./flags.ts";
 import { observeResponse, quotaHeaders, usageFromJsonBody } from "./observe.ts";
 import { decodeRequestText, parseResponseBody, writeRecording } from "./recorder.ts";
 import { redactHeaders } from "./redact.ts";
@@ -32,6 +33,7 @@ type Hooks = {
 export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}) {
   const app = new Hono();
   const turns = createTurnTracker();
+  const isFirstUntested = createVersionCheck(ledger);
 
   app.all("/:harness/*", async (c) => {
     const harness = c.req.param("harness") as Harness;
@@ -89,10 +91,12 @@ export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}) {
 
       let row: CallRow;
       let responseText: string | null = null;
+      // What the response stream showed; stays null if analysis failed.
+      let stream: StreamSummary | null = null;
       try {
         const observed = await observeResponse(toObserver, harness, upstream?.headers.get("content-type") ?? null, start);
         responseText = observed.text || null;
-        const s = observed.summary;
+        const s = (stream = observed.summary);
         const completion = decideCompletion({
           status: upstream?.status ?? null,
           isStream: observed.isStream,
@@ -119,11 +123,20 @@ export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}) {
           timeToFirstTokenMs: s.timeToFirstTokenMs,
           timeToStreamEndMs: observed.timeToStreamEndMs,
           quota: upstream ? quotaHeaders(upstream.headers) : null,
+          serverToolUse: s.serverToolUse ? JSON.stringify(s.serverToolUse) : null,
+          unknownEvents: JSON.stringify(s.unknownEvents),
+          unknownUsageFields: JSON.stringify(s.unknownUsageFields),
         };
       } catch (err) {
         console.error(`[${harness}] analysis failed:`, err);
         row = { ...callRow(base), httpStatus: upstream?.status ?? null, completion: "gateway_error", ...usageColumns(null) };
       }
+
+      // Invariant flags. The version check reads the ledger, so it runs
+      // before this row is written.
+      const flags = callFlags(row, stream);
+      if (isFirstUntested(row.harnessVersion)) flags.push("untested_harness_version");
+      row.flags = JSON.stringify(flags);
 
       await ledger.record(row, { request: requestText, response: responseText });
       log(row);
@@ -197,10 +210,11 @@ function estimateUnreported(info: RequestInfo, requestText: string | null, outpu
   if (info.kind !== "turn" || completion === "complete" || !requestText) return null;
   return {
     inputTokens: estimateTokens(requestText.length),
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
+    // The estimate counts the whole request; how much of it was cached is unknown.
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
     outputTokens: estimateTokens(outputChars),
-    reasoningTokens: 0,
+    reasoningTokens: null,
     codexRolloutBudgetUnits: null,
     estimated: true,
   };
@@ -224,6 +238,13 @@ function log(r: CallRow) {
       ? ""
       : ` in=${r.inputTokens} cache_read=${r.cacheReadTokens} cache_write=${r.cacheWriteTokens} out=${r.outputTokens}${r.tokensEstimated ? " (est.)" : ""}`;
   console.log(`[${r.harness}] ${r.method} ${r.path} -> ${r.httpStatus ?? "-"} ${r.completion} ${r.kind}${tokens} (${Math.round(r.timeToStreamEndMs ?? 0)} ms)`);
+  // Drift is rare and worth noticing, so it gets its own line.
+  const drift = [
+    r.flags && r.flags !== "[]" ? `flags=${r.flags}` : "",
+    r.unknownEvents && r.unknownEvents !== "{}" ? `unknown_events=${r.unknownEvents}` : "",
+    r.unknownUsageFields && r.unknownUsageFields !== "[]" ? `unknown_usage_fields=${r.unknownUsageFields}` : "",
+  ].filter(Boolean);
+  if (drift.length) console.warn(`[${r.harness}] drift (${r.harnessVersion ?? "unknown version"}): ${drift.join(" ")}`);
 }
 
 function parseJson(text: string | null): unknown {

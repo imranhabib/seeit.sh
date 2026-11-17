@@ -175,9 +175,15 @@ These rules are the performance-critical part of the system:
     is ready, so for Codex this already includes model time.
   - `timeToFirstChunkMs`: first body chunk arrived. Usually a metadata event
     (`message_start`), not answer text.
-  - `timeToFirstTokenMs` (Phase 1): first answer delta arrived
-    (`content_block_delta` / `response.output_text.delta`). The real time to
-    first token.
+  - `timeToFirstTokenMs` (Phase 1): first model output arrived. The real
+    time to first token. It is the first delta that carries text the model
+    wrote (answer text, thinking text, tool input), or the start of an
+    output block that arrives whole (`redacted_thinking`). Empty deltas
+    (the empty `input_json_delta` that opens every tool call, the empty
+    `thinking_delta` with thinking `display: "omitted"`) and
+    `signature_delta` do not count. For Codex, only deltas that carry model
+    text count, not every `*.delta` (a server-run shell command's stdout
+    arrives as `response.shell_call_output_content.delta`).
   - `timeToStreamEndMs`: stream ended.
   - Derived: prefill time ≈ `timeToFirstTokenMs − timeToResponseHeadersMs` (shorter
     on cache hits, ties into B); output speed = `output_tokens ÷ (timeToStreamEndMs −
@@ -416,12 +422,18 @@ Phase 1 was built. Gaps 1 and 2 affect cost accuracy, so fix them before the
 Phase 2 cost estimates.
 
 1. **The model can change mid-stream (server-side fallback).** A `fallback`
-   block marks each model boundary, and the final `message_delta` carries the
-   serving model in `input_transformations`. The interpreter takes `model` only
+   block marks each model boundary. The interpreter takes `model` only
    from `message_start`, so after a fallback the ledger records the wrong model
-   and cost uses the wrong price. Fix: read the serving model from the final
-   `message_delta` when present. Test with an example built from the docs (a
-   fallback cannot be triggered on demand).
+   and cost uses the wrong price. Fix: read the serving model from the
+   `fallback` block's `to.model`, and from the `fallback_message` entry in the
+   final `message_delta`'s `usage.iterations` ([refusals and fallback
+   docs](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback),
+   "Streaming"). (`input_transformations` also carries it, but only under a
+   beta header.) Test with an example built from the docs (a fallback cannot
+   be triggered on demand). After a fallback, the top-level `usage` counts
+   only the serving model; every earlier attempt is billed too and is listed
+   only in `usage.iterations`. Such calls are flagged `fallback_usage_partial`
+   until Phase 2 prices each attempt.
 2. **Server tools change input tokens mid-stream.** In the docs' web-search
    example, `message_start` reports `input_tokens: 2679` and the final
    `message_delta` reports `10682`, because search results become input. The
@@ -437,8 +449,8 @@ Phase 2 cost estimates.
 4. **An empty thinking delta counts as the first token.** With thinking
    `display: "omitted"`, the stream sends a `thinking_delta` with an empty
    string, then a `signature_delta`. `timeToFirstTokenMs` is set on that empty
-   delta. Decide the definition (first delta of any kind, or first delta with
-   text) and document it in *Timings per call*.
+   delta. Decided: first delta with text (see *Timings per call*). The same
+   applies to Codex, where not every `*.delta` event is model output.
 5. **Stream recovery may split turns.** For Claude 4.6 and later, the
    documented way to resume an interrupted stream is a new **user** message
    ("Your previous response was interrupted ... Continue from where you left
@@ -594,6 +606,9 @@ it was seen on.
 
 - Pinned price file and estimated USD cost per call (moved from Phase 1).
   Price 5-minute and 1-hour cache writes separately (live finding 6).
+  Price server tool use (`server_tool_use`, billed per search) and, after a
+  server-side fallback, each attempt in `usage.iterations` at its own
+  model's rates (calls flagged `fallback_usage_partial`).
 - OTel export to Langfuse (Docker Compose).
 - Custom dashboard: A, B, C, E.
 - Frontend requirements and implementation order are defined below.
