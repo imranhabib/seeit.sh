@@ -25,13 +25,14 @@ export const ANTHROPIC_USAGE_FIELDS = new Set([
   "output_tokens",
   "cache_read_input_tokens",
   "cache_creation_input_tokens",
-  "cache_creation", // split by cache lifetime; read in a later step (PLAN.md follow-up 3)
+  "cache_creation", // split by cache lifetime (5-minute / 1-hour)
   "output_tokens_details",
   "server_tool_use",
   "service_tier",
   "inference_geo",
   "speed",
   "iterations",
+  "fallback_credit", // refusal credit token (BetaUsage in @anthropic-ai/sdk); not a token count, ignored
 ]);
 
 /**

@@ -24,6 +24,9 @@ export const calls = sqliteTable(
     inputTokens: integer("input_tokens"),
     cacheReadTokens: integer("cache_read_tokens"),
     cacheWriteTokens: integer("cache_write_tokens"),
+    // cache_write_tokens split by cache lifetime; billed at different rates. Null when the provider sends no split.
+    cacheWrite5mTokens: integer("cache_write_5m_tokens"),
+    cacheWrite1hTokens: integer("cache_write_1h_tokens"),
     outputTokens: integer("output_tokens"),
     reasoningTokens: integer("reasoning_tokens"),
     codexRolloutBudgetUnits: real("codex_rollout_budget_units"), // Codex only; meaning undocumented
