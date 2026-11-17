@@ -46,6 +46,22 @@ importers:
         specifier: ^4.23.15
         version: 4.23.15
 
+  apps/iris:
+    dependencies:
+      '@seeit/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      better-sqlite3:
+        specifier: ^13.1.1
+        version: 13.1.1
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^9.6.0
+        version: 9.6.0
+      tsx:
+        specifier: ^4.23.15
+        version: 4.23.15
+
   apps/ledger:
     dependencies:
       '@hono/node-server':

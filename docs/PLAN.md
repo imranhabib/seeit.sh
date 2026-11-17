@@ -529,10 +529,54 @@ it.
    `device_id`, `installation_id`; `account_uuid` sits inside
    `metadata.user_id`, a JSON string; Claude Code's git status block in the
    first user message, which holds the git user name, branch names, and
-   recent commit messages). Decide the subagent rule here (same
-   turn, child turn, or separate), which feeds feature F. Also record whether
+   recent commit messages). The subagent rule is decided (same turn,
+   with `agent_id`; see the Iris findings below), which feeds feature F. Also record whether
    current Claude Code still sends a session-title request in an interactive
    session (finding 2).
+
+   **Iris** (`apps/iris`, `pnpm iris run`) automates these recordings, so
+   they can be repeated whenever a new harness version appears (the
+   `untested_harness_version` flag). Decisions:
+   - **Black box.** Iris starts the gateway's real entry point as its own
+     process and only sets environment variables. It does not import gateway
+     code, so Phase 1C's changes to gateway internals do not break it. Results
+     are read in one place (`results.ts`): the SQLite ledger today, the ledger
+     service's read API after Phase 1C.
+   - **Chaos proxy.** The gateway's upstream points at a small proxy that
+     forwards traffic unchanged, reports when calls start, stream, and end,
+     and can cut one turn stream after its first delta (the dropped-stream
+     scenario). Fault injection stays out of the gateway (ADR 0004).
+   - **Isolation.** A sandbox repo with dummy files and a generic git
+     identity, reset before every scenario, and separate harness logins
+     (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), all in `../seeit-iris/` next to
+     the repo. Claude Code runs with `--strict-mcp-config` and
+     `--disable-slash-commands`: a fresh config still syncs the account's
+     plugins and skills, and these flags keep them out of the requests.
+   - **Structure, not text.** Model output varies between runs, so expected
+     results check structure (turns, kinds, completion, flags, drift), not
+     exact text or call counts.
+   - **Two observers.** The chaos proxy records on its own what each
+     response held (event, block, and item types; whether the final event
+     arrived). The checker (`check.ts`) compares that with the ledger, so a
+     scenario fails when it did not exercise its feature, when the gateway
+     lost a call, or when both sides disagree on an unfinished stream.
+     `pnpm iris run` exits with code 1 on any failure.
+   - **Leak check.** A run fails when text from the owner's own setup
+     reaches a request (`~/.agents/skills`, MCP tools). Codex loads skills
+     from `~/.agents/skills` even with its own `CODEX_HOME`, so Iris gives the
+     Codex process an empty `HOME`.
+   - **Cost.** Scenarios use lightweight models (`claude-sonnet-5-5`,
+     `gpt-6-luna`). Run only the scenarios a change affects (AGENTS.md); a
+     full run takes about 12 minutes.
+   - **Order.** (1) foundation, headless scenarios, and the checker (done:
+     18 scenarios, 9 per harness, pass on Claude Code 2.1.326 and Codex
+     0.169.1); (2) a `tmux`
+     driver for interactive-only actions (Esc interrupt, Codex `/compact`);
+     (3) request-body redaction for fixtures, and fixtures from a run;
+     (4) an `/iris` skill that runs it on a new harness version. Iris never
+     commits anything: fixtures still go through redaction and hand review.
+   - **Not covered yet.** Nested subagents, Claude Code's automatic
+     compaction, Esc interrupt, and Codex's `/compact` command.
 5. **Flagged calls become fixtures (layer 4).** Let `make-fixture` read a call
    from the ledger by ID (bodies are kept 14 days), so a call flagged in step 1
    can become a reviewed regression test.
@@ -540,6 +584,91 @@ it.
    token rule with a tokenizer count of the received text, as LiteLLM does in
    `_recover_interrupted_stream_output_tokens`. The 4-character rule is rough,
    and code and non-English text tokenize differently from prose.
+
+#### Phase 1 follow-ups: findings from Iris runs (2026-11-17)
+
+Claude Code 2.1.326 and Codex 0.169.0 (`codex exec`), headless. Each finding
+has a unit test built from the recorded shape, and an Iris scenario.
+
+1. **Claude Code sends `role: "system"` messages inside `messages`**, often
+   last (environment notes, newly available tools). Turn detection looked at
+   the last message only and missed the user prompt before it. It now skips
+   trailing system messages.
+2. **Subagent rule (decided): a subagent's calls belong to the user's turn
+   that started it, and `agent_id` says which agent made the call.** Claude
+   Code marks subagent calls with the `x-claude-code-agent-id` header. Codex
+   (`spawn_agent`) keeps the session ID but sends a new `turn_id` and
+   `thread_id`; its turn metadata names the user's turn in `root_turn_id` and
+   the parent in `parent_thread_id`. The ledger stores the agent ID in
+   `agent_id` (migration 0005), which feature F can build the tree from.
+3. **Harness-written user messages are not prompts.** A background subagent
+   reports back through a user message that holds only `<system-reminder>`
+   blocks ("[SYSTEM NOTIFICATION - NOT USER INPUT]"). Such a message does not
+   start a turn.
+4. **A tool can make its own model calls, and they belong to the turn.**
+   Claude Code's WebSearch tool sends a call with only the `web_search`
+   server tool, and sometimes a second call with no tools that reads the
+   fetched page (56k input tokens in one run). Neither carries anything that
+   names the turn: no agent ID, no turn marker; the only link is the session
+   ID (checked field by field; the `cc_version` suffix in the billing line
+   changes per session, so it does not mark the call type either). Rules:
+   - A call offering a client tool **or a server tool** is a turn call; only
+     a call with a client tool (the agent loop) can **start** a turn, since
+     the server-tool call ends in text the tool wrote ("Perform a web search
+     for ...").
+   - **Background calls with a session ID are linked to the session's turn
+     in progress** (`turn_id` set, `kind` stays `background`, so turn counts
+     do not change). The link is inferred: a background row with a `turn_id`
+     was linked this way. Before the first turn (the startup quota probe)
+     there is nothing to link to. Codex's `POST /alpha/search` is linked the
+     same way.
+   - Effect in one run: the web-search turn showed 41,426 tokens; the prompt
+     really cost 56,229. Per-turn totals now include such calls.
+5. **Gap 5, answered.** After a dropped stream Claude Code sends the request
+   again by itself. If no answer text had arrived, the request is identical.
+   If the stream was cut mid-answer, the same user message gains one text
+   block ("Your response above was cut off mid-stream. Resume directly from
+   where it stops ...") and a newline at the end of the prompt block; no new
+   message is added. Both stay in the turn: the turn tracker compares the
+   position and per-block hashes of the message that started the turn
+   (`resendsTurnStart`). Codex retries with its own turn ID.
+6. **`/compact` is a model call with tools**, so it counts as a turn of its
+   own; the next prompt is a new turn. Auto-compaction in the middle of a
+   turn is not recorded yet and would probably split that turn.
+7. **Codex web search** runs as a separate `POST /alpha/search` request, not
+   as an item in the answer stream, and only on Codex's built-in provider:
+   with the custom provider from the README the tool is not offered
+   (`--search` has no effect with `exec`; `web_search="live"` is the setting).
+8. **Codex's built-in provider tries a Responses WebSocket first**
+   (`GET /responses`). The gateway does not proxy WebSockets: each attempt
+   gets a 405, and after about 9 seconds of retries Codex falls back to HTTP
+   streaming. The custom provider in the README does not try a WebSocket.
+   Supporting WebSockets is not planned; keep recommending the custom
+   provider.
+9. **Unknown block and delta types are drift.** `citations_delta` was seen
+   live and skipped silently. Block and delta types the interpreter does not
+   know are now counted in `unknown_events`; a `compaction_delta` summary
+   counts as output.
+10. **Codex compaction is a separate call.** With a low
+    `model_auto_compact_token_limit`, Codex sends a `POST /responses` whose
+    turn metadata says `request_kind: "compaction"`. The gateway labels it
+    `background` (no extra turn) and links it to the turn that triggered it,
+    so its tokens count in that turn. After it, cache reads drop back to the
+    prompt's base size. The proxy marks the request kind, so the scenario
+    proves compaction happened.
+11. **Codex hooks** use the same `hooks.json` format as Claude Code, in a
+    project's `.codex/` folder. Codex runs them only in a trusted project
+    with trusted hooks (`--trust`, `--dangerously-bypass-hook-trust` for
+    automation that writes its own hooks). Plain stdout from a
+    `UserPromptSubmit` hook is added to the prompt, as in Claude Code.
+12. **A lightweight model may skip thinking.** With adaptive thinking at the
+    default effort, `claude-sonnet-5-5` answered without a thinking block;
+    the thinking scenario uses `--effort high` and a harder question.
+13. **Redaction gap.** `anthropic-organization-id` (on every Anthropic
+    response) was written to recordings. It and `x-codex-turn-state` are now
+    redacted. `x-codex-turn-metadata` is kept: the gateway reads turn and
+    agent IDs from it; it holds `installation_id`, which fixture redaction
+    must remove.
 
 #### Phase 1 follow-ups: findings from live runs (2026-11-14)
 

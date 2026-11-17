@@ -19,6 +19,41 @@ export const ANTHROPIC_EVENTS = new Set([
   "error",
 ]);
 
+/**
+ * Content block types (content_block_start). Source: the content_block union
+ * of BetaRawContentBlockStartEvent in @anthropic-ai/sdk 1.4.0.
+ */
+export const ANTHROPIC_BLOCKS = new Set([
+  "text",
+  "thinking",
+  "redacted_thinking",
+  "tool_use",
+  "server_tool_use",
+  "mcp_tool_use",
+  "mcp_tool_result",
+  "mcp_tool_listing",
+  "web_search_tool_result",
+  "web_fetch_tool_result",
+  "code_execution_tool_result",
+  "bash_code_execution_tool_result",
+  "text_editor_code_execution_tool_result",
+  "tool_search_tool_result",
+  "advisor_tool_result",
+  "container_upload",
+  "compaction",
+  "fallback",
+]);
+
+/** Delta types (content_block_delta). Source: BetaRawContentBlockDelta in @anthropic-ai/sdk 1.4.0. */
+export const ANTHROPIC_DELTAS = new Set([
+  "text_delta",
+  "thinking_delta",
+  "input_json_delta",
+  "compaction_delta",
+  "signature_delta", // integrity data for a thinking block; not output
+  "citations_delta", // source references attached to text; not output
+]);
+
 /** Top-level fields of Anthropic `usage`. Seen in the claude-cli 2.1.322 fixture, plus server_tool_use from the docs. */
 export const ANTHROPIC_USAGE_FIELDS = new Set([
   "input_tokens",
