@@ -11,8 +11,8 @@ export const calls = sqliteTable(
     harness: text("harness").notNull(), // "claude" | "codex"
     harnessVersion: text("harness_version"),
     sessionId: text("session_id"),
-    turnId: text("turn_id"), // null for background calls
-    kind: text("kind").notNull(), // "turn" | "background"
+    turnId: text("turn_id"), // null unless kind is "turn"
+    kind: text("kind").notNull(), // "turn" | "background" | "connectivity" (CallKind in packages/core/src/request.ts)
     method: text("method").notNull(),
     path: text("path").notNull(),
     httpStatus: integer("http_status"), // null if upstream never answered
@@ -26,6 +26,7 @@ export const calls = sqliteTable(
     cacheWriteTokens: integer("cache_write_tokens"),
     outputTokens: integer("output_tokens"),
     reasoningTokens: integer("reasoning_tokens"),
+    codexRolloutBudgetUnits: real("codex_rollout_budget_units"), // Codex only; meaning undocumented
     tokensEstimated: integer("tokens_estimated", { mode: "boolean" }).notNull(),
 
     // Timings in ms since the gateway received the request (PLAN.md, "Timings per call").

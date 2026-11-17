@@ -13,6 +13,12 @@ export type Usage = {
   outputTokens: number;
   /** Thinking / reasoning tokens. Already included in outputTokens. */
   reasoningTokens: number;
+  /**
+   * Codex only: `codex_rollout_budget_units` from response.completed usage, a
+   * decimal number. Its meaning is not documented; stored so it can be studied.
+   * Null when missing (always for Anthropic).
+   */
+  codexRolloutBudgetUnits: number | null;
   /** True when some numbers are gateway estimates, not provider-reported. */
   estimated: boolean;
 };
@@ -34,6 +40,7 @@ export function fromAnthropicUsage(u: Json): Usage {
     cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
     outputTokens: u.output_tokens ?? 0,
     reasoningTokens: u.output_tokens_details?.thinking_tokens ?? 0,
+    codexRolloutBudgetUnits: null,
     estimated: false,
   };
 }
@@ -48,6 +55,8 @@ export function fromOpenAIUsage(u: Json): Usage {
     cacheWriteTokens: cacheWrite,
     outputTokens: u.output_tokens ?? 0,
     reasoningTokens: u.output_tokens_details?.reasoning_tokens ?? 0,
+    // Source: codex-rs/codex-api/src/sse/responses.rs, ResponseCompletedUsage.
+    codexRolloutBudgetUnits: typeof u.codex_rollout_budget_units === "number" ? u.codex_rollout_budget_units : null,
     estimated: false,
   };
 }

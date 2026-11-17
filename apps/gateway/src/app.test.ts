@@ -29,7 +29,11 @@ let upstreamSawClose = false;
 
 const upstream: Server = createServer((req, res) => {
   upstreamReqHeaders = req.headers;
-  if (req.url === "/v1/forever" || req.url === "/v1/messages?forever=1") {
+  if (req.method === "HEAD") {
+    // Like api.anthropic.com for Claude Code 2.1.133's HEAD /claude.
+    res.writeHead(404);
+    res.end();
+  } else if (req.url === "/v1/forever" || req.url === "/v1/messages?forever=1") {
     res.writeHead(200, { "content-type": "text/event-stream" });
     const timer = setInterval(() => res.write('event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"tick "}}\n\n'), 20);
     res.on("close", () => {
@@ -232,6 +236,14 @@ describe("ledger", () => {
       cacheReadTokens: 40,
       outputTokens: 2,
     });
+  });
+
+  // PLAN.md, live-run finding 1.
+  it("records a HEAD connectivity check as complete, even when upstream says 404", async () => {
+    const call = nextCall("HEAD", "/api/hello");
+    const res = await fetch(`${gatewayUrl}/claude/api/hello`, { method: "HEAD", headers: { "user-agent": "Bun/1.4.4" } });
+    expect(res.status).toBe(404);
+    expect(await call).toMatchObject({ kind: "connectivity", completion: "complete", httpStatus: 404, harnessVersion: null, turnId: null });
   });
 
   it("estimates usage for a cut stream", async () => {

@@ -5,10 +5,18 @@
 // missing fields and checks every place a value is known to live.
 
 export type Harness = "claude" | "codex";
-export type CallKind = "turn" | "background";
+/**
+ * turn: part of a prompt the user typed. background: a side request (quota
+ * probe, title, model list). connectivity: a HEAD request that only checks the
+ * gateway and upstream can be reached; it uses no tokens.
+ */
+export type CallKind = "turn" | "background" | "connectivity";
 
 export type RequestInfo = {
-  /** "claude-cli/2.1.322", "codex_exec/0.169.0", "Codex Desktop/0.169.0-alpha.11.1" */
+  /**
+   * "claude-cli/2.1.322", "codex_exec/0.169.0", "Codex Desktop/0.169.0-alpha.11.1".
+   * Null when the user-agent is not the harness's own (for example "Bun/1.4.4").
+   */
   harnessVersion: string | null;
   sessionId: string | null;
   /** Turn ID sent by the harness (Codex). Claude sends none; see startsNewTurn. */
@@ -34,10 +42,26 @@ export function readRequest(
   req: { method: string; path: string; headers: Headers; body: unknown },
 ): RequestInfo {
   const body: Json = isObject(req.body) ? req.body : {};
-  const harnessVersion = req.headers.get("user-agent")?.match(/^(.+?\/\S+)/)?.[1] ?? null;
+  const harnessVersion = harnessVersionFrom(harness, req.headers.get("user-agent"));
   return harness === "claude"
     ? readClaude(req.method, req.path, req.headers, body, harnessVersion)
     : readCodex(req.method, req.path, req.headers, body, harnessVersion);
+}
+
+// The user-agent starts with "product/version". Some requests carry a runtime's
+// user-agent instead (Claude Code's connectivity check sends "Bun/1.4.4"), and
+// storing that as the harness version would hide which harness version sent
+// the call (PLAN.md, live-run finding 1). So keep it only when the product
+// name belongs to the harness.
+const HARNESS_PRODUCT: Record<Harness, RegExp> = {
+  claude: /^claude-cli$/,
+  codex: /^codex/i, // codex_exec, codex_cli_rs, Codex Desktop, ...
+};
+
+function harnessVersionFrom(harness: Harness, userAgent: string | null): string | null {
+  const match = userAgent?.match(/^(.+?)\/(\S+)/);
+  if (!match || !HARNESS_PRODUCT[harness].test(match[1]!)) return null;
+  return `${match[1]}/${match[2]}`;
 }
 
 function readClaude(method: string, path: string, headers: Headers, body: Json, harnessVersion: string | null): RequestInfo {
@@ -45,7 +69,7 @@ function readClaude(method: string, path: string, headers: Headers, body: Json, 
   const isMessages = method === "POST" && /^\/v1\/messages(\?|$)/.test(path);
   // Heuristic: the main agent loop always sends tools. Calls without tools are
   // side requests (the startup "quota" probe, title generation, ...).
-  const kind: CallKind = isMessages && tools.length > 0 ? "turn" : "background";
+  const kind: CallKind = method === "HEAD" ? "connectivity" : isMessages && tools.length > 0 ? "turn" : "background";
 
   return {
     harnessVersion,
@@ -87,7 +111,8 @@ function readCodex(method: string, path: string, headers: Headers, body: Json, h
   const turnMeta = parseJson(headers.get("x-codex-turn-metadata")) ?? parseJson(body.client_metadata?.["x-codex-turn-metadata"]) ?? {};
   const isResponses = method === "POST" && /^\/responses(\?|$)/.test(path);
   const requestKind = turnMeta.request_kind;
-  const kind: CallKind = isResponses && (requestKind === undefined || requestKind === "turn") ? "turn" : "background";
+  const kind: CallKind =
+    method === "HEAD" ? "connectivity" : isResponses && (requestKind === undefined || requestKind === "turn") ? "turn" : "background";
 
   // Tools: top-level `tools` (older Codex) or an `additional_tools` input item
   // (Codex 0.169+). Tools may be grouped into namespaces.

@@ -101,6 +101,7 @@ export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}) {
           clientAborted: c.req.raw.signal.aborted,
           readFailed: observed.readFailed,
           gatewayFailed: false,
+          connectivityCheck: info.kind === "connectivity",
         });
         const usage =
           s.usage ??
@@ -200,6 +201,7 @@ function estimateUnreported(info: RequestInfo, requestText: string | null, outpu
     cacheWriteTokens: 0,
     outputTokens: estimateTokens(outputChars),
     reasoningTokens: 0,
+    codexRolloutBudgetUnits: null,
     estimated: true,
   };
 }
@@ -211,6 +213,7 @@ function usageColumns(u: Usage | null) {
     cacheWriteTokens: u?.cacheWriteTokens ?? null,
     outputTokens: u?.outputTokens ?? null,
     reasoningTokens: u?.reasoningTokens ?? null,
+    codexRolloutBudgetUnits: u?.codexRolloutBudgetUnits ?? null,
     tokensEstimated: u?.estimated ?? false,
   };
 }

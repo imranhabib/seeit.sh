@@ -48,9 +48,21 @@ describe("readRequest: claude", () => {
     expect(info.startsNewTurn).toBe(false);
   });
 
-  it("labels non-messages endpoints as background", () => {
-    const info = readRequest("claude", { method: "HEAD", path: "/api/hello", headers: new Headers({ "user-agent": "Bun/1.4.4" }), body: null });
-    expect(info).toMatchObject({ kind: "background", harnessVersion: "Bun/1.4.4" });
+  // PLAN.md, live-run finding 1: 2.1.133 sends HEAD /claude (empty path), 2.1.311
+  // sends HEAD /api/hello. Both carry the Bun runtime's user-agent.
+  it.each(["", "/api/hello"])("labels HEAD %j as a connectivity check with no harness version", (path) => {
+    const info = readRequest("claude", { method: "HEAD", path, headers: new Headers({ "user-agent": "Bun/1.4.4" }), body: null });
+    expect(info).toMatchObject({ kind: "connectivity", harnessVersion: null, startsNewTurn: false });
+  });
+
+  it("labels other non-messages endpoints as background", () => {
+    const info = readRequest("claude", { method: "GET", path: "/v1/models", headers: new Headers({ "user-agent": "claude-cli/2.1.311 (external, cli)" }), body: null });
+    expect(info).toMatchObject({ kind: "background", harnessVersion: "claude-cli/2.1.311" });
+  });
+
+  it("takes the version only from Claude Code's own user-agent", () => {
+    expect(claude({ tools: [tool], messages: [] }, { "user-agent": "Bun/1.3.14" }).harnessVersion).toBeNull();
+    expect(claude({ tools: [tool], messages: [] }, { "user-agent": "codex_exec/0.169.0" }).harnessVersion).toBeNull();
   });
 });
 
@@ -91,5 +103,13 @@ describe("readRequest: codex", () => {
   it("labels the /models call as background", () => {
     const info = readRequest("codex", { method: "GET", path: "/models?client_version=0.169.0", headers: headers("codex_exec/0.169.0"), body: null });
     expect(info.kind).toBe("background");
+  });
+
+  it("takes the version only from a Codex user-agent", () => {
+    // codex_cli_rs is the interactive Codex CLI's originator name.
+    expect(readRequest("codex", { method: "GET", path: "/models", headers: headers("codex_cli_rs/0.169.0 (Mac OS 26.5.1; arm64)"), body: null }).harnessVersion).toBe(
+      "codex_cli_rs/0.169.0",
+    );
+    expect(readRequest("codex", { method: "GET", path: "/models", headers: headers("node/24.1.0"), body: null }).harnessVersion).toBeNull();
   });
 });
