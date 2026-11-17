@@ -54,12 +54,16 @@ Morpheus remains in its existing separate repository.
 
 - **Gateway:** forwards raw provider traffic and collects recording data from
   its own stream branch. It sends recordings to the ledger over HTTP outside
-  the client response path. It has no PostgreSQL connection or credentials.
+  the client response path. Credential scrubbing stays here: sanitize the
+  recording copy before any local write, log, or ledger transmission. Forward
+  the original harness credentials and provider traffic unchanged. The gateway
+  has no PostgreSQL connection or credentials.
 - **Ledger service:** owns recording ingestion, all application database reads
   and writes, schema migrations, retention, and derived analysis. The dashboard
   and CLI use its read endpoints. Write credentials belong to the gateway;
   browser clients have read access only. Initial parser placement remains as
-  implemented; moving parsing out of the gateway is a separate change.
+  implemented; moving usage/context parsing out of the gateway is a separate
+  change and does not move the gateway's credential-scrubbing responsibility.
 - **PostgreSQL:** the single target ledger database. The ledger owns access,
   but PostgreSQL runs as a separate process/container. Its placement can change
   without changing the gateway-to-ledger contract.
@@ -118,12 +122,20 @@ readiness; a running container alone is not a readiness check.
 - Apply the same authentication, validation, idempotency, and retry behavior
   over loopback, Compose networking, and cloud networking. Change configuration
   between deployments, not delivery semantics.
-- **Before storage cutover:** explicitly decide restart durability and queue
-  overflow behavior. A durable local outbox is needed if pending recordings
-  must survive gateway restarts. Do not claim lossless delivery from an
-  in-memory retry queue or silently choose a drop policy. Verify delayed/lost
-  acknowledgements, duplicate delivery, ledger outage/recovery, saturation,
-  and gateway restart against the chosen policy.
+- **V1 delivery is best effort:** use bounded in-memory pending recordings and
+  retries. There is no durable outbox or restart replay. Unacknowledged records
+  can be lost on gateway restart, exhausted retries, or queue saturation; a
+  record already committed by the ledger remains stored even if its
+  acknowledgement was lost. Specify queue limits and overflow handling in the
+  gateway-delivery PR and make recording loss visible without captured content.
+  Do not claim lossless delivery. Verify delayed/lost acknowledgements,
+  duplicate delivery, outage/recovery, saturation, and restart behavior.
+- **V2 follow-up:** reconsider a bounded durable outbox on gateway-local
+  persistent storage after the v1 services and dashboard are complete. Its
+  storage format, disk limits, overflow policy, retention, and restart replay
+  are deferred decisions; they do not block v1. Gateway credential scrubbing
+  must precede any future outbox write. Existing debug recordings are not a
+  supported delivery outbox or replay mechanism.
 
 ### Interception
 
@@ -232,7 +244,11 @@ These rules are the performance-critical part of the system:
 ### Security
 
 - Never store or log `Authorization`, cookies, or account-ID headers. Redact
-  them before any write.
+  them in the gateway's recording copy before any write or transmission to the
+  ledger. Use the redaction helper and extend it for credential-bearing fields
+  included in the ingestion contract; current header redaction alone does not
+  establish that arbitrary body content is secret-free. Scrubbing must not
+  change the request or response bytes forwarded between harness and provider.
 - Bind to `127.0.0.1` locally.
 - Server deployment: no public port. Reach it over Tailscale and require a
   gateway token in a custom header (`ANTHROPIC_CUSTOM_HEADERS` for Claude Code,
@@ -851,9 +867,9 @@ Complete these foundation PRs before expanding the frontend stages below:
 
 | PR slice | Result | Verification |
 | --- | --- | --- |
-| Architecture and contracts | Record ADR 0007, service ownership, read/write permissions, and ingestion acknowledgement/idempotency semantics. Resolve durability and overflow policy before gateway cutover. | Review synthetic success, duplicate, timeout, and failure examples; no raw SQL or browser write credential. |
+| Architecture and contracts | Record ADR 0007, service ownership, gateway-side credential scrubbing, read/write permissions, and ingestion acknowledgement/idempotency semantics. Specify v1 best-effort delivery and defer the durable outbox to v2. | Review synthetic success, duplicate, timeout, and failure examples; recording credentials do not reach ledger payloads, logs, or local writes; no browser write credential. |
 | Ledger storage and ingestion | Add the standalone ledger entry point, PostgreSQL schema/migrations, and transactional recording ingestion. Document a native PostgreSQL setup. | Native database integration tests prove persistence, duplicate safety, and acknowledgement only after commit. |
-| Gateway delivery | Replace direct SQLite recording with the bounded HTTP delivery client and chosen durability policy. Handle existing-data cutover explicitly. | Slow/unavailable ledger, lost acknowledgements, saturation, and restart tests; first chunks still arrive before upstream finishes during concurrent delivery. |
+| Gateway delivery | Replace direct SQLite recording with the bounded in-memory HTTP delivery client; scrub recording credentials before transmission. Define queue limits and overflow handling, document restart loss, and handle existing-data cutover explicitly. No durable outbox in v1. | Slow/unavailable ledger, lost acknowledgements, saturation, restart loss, and credential-scrubbing tests; provider credentials pass through unchanged and first chunks still arrive before upstream finishes during concurrent delivery. |
 | Ledger read API | Move the initial metadata endpoints and tests from PR #5 into the ledger service; remove the API mount and database dependency from the gateway. | Filtering, pagination, null/estimate semantics, safe JSON errors, and read/write authorization against PostgreSQL. |
 | Local runtime modes | Add separate native startup commands, example configuration, gateway/ledger images, Compose, health checks, and persistent database volumes. | Run the same ingestion/read/outage scenarios with zero Docker dependencies and with Compose; restart/recreate services and confirm stored calls remain. |
 
