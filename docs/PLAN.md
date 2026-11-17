@@ -16,8 +16,13 @@ critical for performance.
   ChatGPT login). The gateway passes these credentials through unchanged.
   "Cost" is therefore always an **estimated API-equivalent cost**. The real
   limit is the plan quota.
-- **Runs:** locally first (`127.0.0.1`), later on a private server reached over
-  Tailscale.
+- **Runs:** locally first as separate native processes or Docker containers;
+  later as separate cloud services reached over Tailscale. Docker is optional
+  for local operation, including PostgreSQL.
+- **Frontend:** one read-only dashboard, available in a standalone desktop
+  browser and through a new **seeit** sidebar group in an Open WebUI fork.
+  Open WebUI is another way to view Claude Code and Codex traffic; recording
+  Open WebUI's own conversations is outside this release.
 
 ## Architecture
 
@@ -26,11 +31,111 @@ critical for performance.
                                │  gateway  /claude/*  /codex/* │
  codex ───provider base_url───▶ │                              │ ──▶ chatgpt.com/backend-api/codex
                                └──────┬───────────────────────┘
-                                      │ tee (off the hot path)
+                                      │ tee / background recording
                                       ▼
-                         parser ─▶ SQLite ledger ─▶ dashboard (A, B, C, E)
-                                └▶ OTel traces  ─▶ Langfuse
+                            HTTP ledger service ◀── dashboard / CLI
+                                      │
+                                      ▼
+                                 PostgreSQL
+
+                  OTel traces ──▶ Langfuse (general trace browsing)
 ```
+
+This is the confirmed target architecture. The current implementation still
+uses an embedded SQLite ledger. [ADR 0007](adr/0007-ledger-service-and-postgres.md)
+records the replacement and the service boundary; the historical Phase 1
+sections below describe what was built, not a second supported storage engine.
+
+### Service boundaries and deployment modes
+
+Keep gateway, ledger, and dashboard in this monorepo. Each server has its own
+entry point, configuration, startup command, and deployment artifact.
+Morpheus remains in its existing separate repository.
+
+- **Gateway:** forwards raw provider traffic and collects recording data from
+  its own stream branch. It sends recordings to the ledger over HTTP outside
+  the client response path. Credential scrubbing stays here: sanitize the
+  recording copy before any local write, log, or ledger transmission. Forward
+  the original harness credentials and provider traffic unchanged. The gateway
+  has no PostgreSQL connection or credentials.
+- **Ledger service:** owns recording ingestion, all application database reads
+  and writes, schema migrations, retention, and derived analysis. The dashboard
+  and CLI use its read endpoints. Write credentials belong to the gateway;
+  browser clients have read access only. Initial parser placement remains as
+  implemented; moving usage/context parsing out of the gateway is a separate
+  change and does not move the gateway's credential-scrubbing responsibility.
+- **PostgreSQL:** the single target ledger database. The ledger owns access,
+  but PostgreSQL runs as a separate process/container. Its placement can change
+  without changing the gateway-to-ledger contract.
+- **Dashboard:** the same frontend serves standalone and Morpheus access.
+  The ledger service can serve the built static frontend; development uses Vite.
+
+| Mode | Gateway and ledger | PostgreSQL | Service addressing |
+| --- | --- | --- | --- |
+| Native local, no Docker | Separate Node processes on one machine. | Locally installed PostgreSQL with persistent data. | Loopback HTTP and a local database connection. |
+| Docker local | Separate gateway and ledger containers started with Compose. | Separate PostgreSQL container with a named persistent volume. | Compose service names; publish user-facing ports on host loopback. |
+| Cloud | Gateway and ledger containers on separate instances/deployment units. | Initially a separate container with persistent storage on the ledger instance; can move to a dedicated database service. | Configured private network addresses and authenticated service requests. |
+
+Native local operation is a first-class supported mode: installation, database
+creation, migrations, startup, tests, and shutdown must work with no Docker
+commands or Docker daemon. Do not make package scripts wrap Compose as the only
+way to run a service. Docker invokes the same application entry points, with
+environment-specific addresses and credentials. Publish example configuration
+and separate startup commands for both modes; distinguish non-watching startup
+for real harness traffic from development watch commands.
+
+The harness interface stays the same: Claude Code and Codex point at the
+gateway base URL; the gateway calls the provider. For local containers, listen
+on `0.0.0.0` inside the container and publish the gateway on host
+`127.0.0.1:8787`. Container-to-container traffic uses service names, not host
+loopback. Cloud harnesses use the private gateway URL.
+
+Use Docker images for cloud gateway and ledger deployment and Compose for the
+local container stack. Compose on one host does not provide cross-instance
+scaling. Separate cloud deployments can receive independent resources;
+horizontal gateway replicas also require coordinated turn tracking and future
+budget counters before they are safe. Do not introduce orchestration as part
+of the frontend work.
+
+PostgreSQL data must survive application/container restarts and replacement in
+both local modes and the cloud. Document native data-directory ownership and
+Docker volume lifecycle, including that deleting a volume deletes its data.
+Persistence and backups are separate concerns. The ledger waits for database
+readiness; a running container alone is not a readiness check.
+
+### Recording delivery rules — identical in every mode
+
+- The gateway never waits for ledger ingestion or a database acknowledgement
+  before forwarding provider chunks or finishing the harness response.
+  Ledger downtime must not turn recording into a new forwarding dependency.
+- Initially send completed call metadata and captured bodies after collection
+  finishes, including interrupted-call records. Sending live recording streams
+  and moving parser work are separate implementation decisions.
+- Generate a stable call ID before collection. Retrying a recording with that
+  ID must not insert a second call, duplicate bodies, or double-count usage.
+  Acknowledge successful ingestion only after its database transaction commits.
+- Bound request timeouts, retries, and pending recording count/bytes. A slow
+  ledger must not create unbounded memory use or backpressure on the client
+  stream. Make delivery failures and queue saturation visible without logging
+  credentials or captured content. Serialization and delivery still consume
+  gateway resources and need concurrent-stream verification.
+- Apply the same authentication, validation, idempotency, and retry behavior
+  over loopback, Compose networking, and cloud networking. Change configuration
+  between deployments, not delivery semantics.
+- **V1 delivery is best effort:** use bounded in-memory pending recordings and
+  retries. There is no durable outbox or restart replay. Unacknowledged records
+  can be lost on gateway restart, exhausted retries, or queue saturation; a
+  record already committed by the ledger remains stored even if its
+  acknowledgement was lost. Specify queue limits and overflow handling in the
+  gateway-delivery PR and make recording loss visible without captured content.
+  Do not claim lossless delivery. Verify delayed/lost acknowledgements,
+  duplicate delivery, outage/recovery, saturation, and restart behavior.
+- **V2 follow-up:** reconsider a bounded durable outbox on gateway-local
+  persistent storage after the v1 services and dashboard are complete. Its
+  storage format, disk limits, overflow policy, retention, and restart replay
+  are deferred decisions; they do not block v1. Gateway credential scrubbing
+  must precede any future outbox write. Existing debug recordings are not a
+  supported delivery outbox or replay mechanism.
 
 ### Interception
 
@@ -71,10 +176,10 @@ These rules are the performance-critical part of the system:
   sent at startup to read the plan-quota headers). These are labeled
   `background` so they do not count as turns or skew per-turn metrics. Their
   tokens still count toward totals and budgets.
-- **SQLite ledger** ([ADR 0003](adr/0003-sqlite-ledger-plus-langfuse.md)): one
+- **PostgreSQL ledger** ([ADR 0007](adr/0007-ledger-service-and-postgres.md)): one
   row per call with harness, session, turn, model, input / output / cache-read /
   cache-write tokens, estimated cost, latency. It is the source of truth for
-  budgets and the custom dashboard.
+  budgets and the custom dashboard, owned by the separate ledger service.
 - **Timings per call** (milliseconds from when the gateway received the
   request, measured with the monotonic `performance.now()` clock):
   - `timeToResponseHeadersMs`: upstream status and headers arrived. Network,
@@ -139,7 +244,11 @@ These rules are the performance-critical part of the system:
 ### Security
 
 - Never store or log `Authorization`, cookies, or account-ID headers. Redact
-  them before any write.
+  them in the gateway's recording copy before any write or transmission to the
+  ledger. Use the redaction helper and extend it for credential-bearing fields
+  included in the ingestion contract; current header redaction alone does not
+  establish that arbitrary body content is secret-free. Scrubbing must not
+  change the request or response bytes forwarded between harness and provider.
 - Bind to `127.0.0.1` locally.
 - Server deployment: no public port. Reach it over Tailscale and require a
   gateway token in a custom header (`ANTHROPIC_CUSTOM_HEADERS` for Claude Code,
@@ -149,7 +258,8 @@ These rules are the performance-critical part of the system:
 
 ### Operations
 
-- Runs as a `launchd` service. If the gateway is down, the harnesses fail
+- Native local services can be managed with `launchd`; Docker deployments use
+  separate containers. If the gateway is down, the harnesses fail
   (fail-closed). This is on purpose: budgets must not be easy to bypass.
 - Emergency bypass: unset `ANTHROPIC_BASE_URL` / switch the Codex profile.
 - A gateway restart cuts every stream in progress. In development, `pnpm dev`
@@ -180,7 +290,7 @@ plural noun lists (`calls`), a singular noun shows one (`call <id>`).
 | `seeit call <id> [--request --response]` | Timings, usage, completion, flags; stored bodies for debugging (context breakdown with A) | 1, then 2 |
 | `seeit drift` | Unknown event types, usage fields, and invariant flags per harness version | 1 (follow-up 1) |
 | `seeit fixture <call-id\|session-id> -o <file>` | Redacted test fixture from the ledger | 1 (follow-ups 4–5) |
-| `seeit sql "<select>"` | Read-only escape hatch for any other question | 1 |
+| `seeit sql "<select>"` | Legacy local SQLite escape hatch; revisit after the PostgreSQL migration | deferred |
 | `seeit usage [--by day\|harness\|model] [--since]` | Tokens and estimated USD | 2 |
 | `seeit quota` | Plan-quota use and forecast (C) | 2 |
 | `seeit prices update` | Refresh the pinned price file on purpose (never at runtime) | 2 |
@@ -199,13 +309,12 @@ plural noun lists (`calls`), a singular noun shows one (`call <id>`).
 
 **Decisions.**
 
-- **The CLI reads through the gateway's read API, not the SQLite file.** The
-  gateway will later run on a private server, where the ledger is not on the
-  laptop. The Phase 2 dashboard needs the same API, so both share it. The
-  first CLI commands bring the first read endpoints; the dashboard extends
-  them. Write an ADR for this before building the CLI.
-- **`seeit sql` is the exception.** It opens the local database read-only and
-  is never exposed over the network: raw SQL over HTTP is risk with no benefit.
+- **The CLI and dashboard read through the ledger service's HTTP API.** They
+  do not open the database or route reads through the gateway. This works with
+  native local processes, containers, and a remote ledger service (ADR 0007).
+- **`seeit sql` is deferred.** Its earlier local SQLite-file design no longer
+  fits the target architecture. Do not add a raw SQL HTTP endpoint or give the
+  ordinary CLI PostgreSQL credentials to preserve that old implementation.
 - **`seeit fixture` keeps the hand review.** It writes to a file and prints a
   reminder that the repo is public; it never writes into the test folders
   itself.
@@ -214,7 +323,7 @@ plural noun lists (`calls`), a singular noun shows one (`call <id>`).
 - **Developer tasks stay in the `justfile`** (`just reset`, `just test`). The
   CLI is for operating and inspecting the gateway, not for working on its
   code.
-- **Build order:** `calls`, `call`, `sessions`, `session`, `sql` first. They
+- **Build order:** `calls`, `call`, `sessions`, `session` first. They
   replace `q()` right away. The rest arrive with the phase that adds their
   data.
 
@@ -224,14 +333,20 @@ TypeScript on Node 24 LTS with Hono ([ADR 0002](adr/0002-typescript-node-hono.md
 
 ```
 apps/gateway      Hono proxy server
+apps/ledger       Separate HTTP service; owns PostgreSQL storage and read/write APIs
 apps/dashboard    Vite + React custom dashboard (Phase 2)
 apps/cli          `seeit` command (see *CLI*)
-packages/core     shared parsers, schema, pricing
-infra/            Docker Compose for Langfuse, launchd plist
+packages/core     shared parsers and pricing helpers
+packages/contracts shared ledger HTTP request/response contracts when needed
+infra/            Dockerfiles, Compose, native setup and service deployment docs
 docs/             this plan, ADRs
 ```
 
-SQLite through `better-sqlite3` with Drizzle (Phase 1). Tests with Vitest.
+Target: PostgreSQL through an asynchronous driver with Drizzle, owned by
+`apps/ledger`. Phase 1 used SQLite through `better-sqlite3`; preserve existing
+migration history and decide how existing recordings are imported before
+cutover. Tests use Vitest; ledger integration tests must also run against a
+configured native PostgreSQL instance without requiring Docker.
 
 ## Differentiators
 
@@ -505,6 +620,39 @@ it was seen on.
    (`cache_write_tokens`), so Phase 2 cost would underprice every Claude Code
    cache write. Fix in step 3 above.
 
+### Phase 1C — Ledger service and delivery (next)
+
+Complete the service boundary before moving dashboard reads onto it. Keep the
+existing gateway operational while the new ledger is built and tested. This
+milestone uses the latest parser fields from main, including nullable usage,
+cache writes by lifetime, server-tool use, and drift/completion flags.
+
+Each row is a separate PR; split further if its review or learning scope grows.
+After every PR, stop for a walkthrough of testing, code changes, reasons, and
+known limits. Do not combine PostgreSQL migration, gateway cutover, and UI
+changes in one PR.
+
+| PR slice | Result | Verification |
+| --- | --- | --- |
+| Architecture and contract requirements | Publish ADR 0007, service ownership, gateway-side credential scrubbing, read/write permissions, and ingestion acknowledgement/idempotency requirements. Specify v1 best-effort delivery and defer the durable outbox to v2. | Review success, duplicate, timeout, and failure scenarios; distinguish implemented behavior from the target architecture. |
+| PostgreSQL foundation | Add the standalone ledger package, native database setup, connection lifecycle, schema, and generated migrations. Preserve the latest parser fields and existing SQLite migration history. | Use a native PostgreSQL test database; store/read synthetic records and verify they remain after restart. No Docker requirement. |
+| Recording ingestion | Add the authenticated write endpoint, concrete recording payload/validation, and transactional idempotent writes. Scrub recording credentials before they leave the gateway; never send raw authorization headers. | Duplicate submissions count once; a successful acknowledgement follows commit; invalid or unauthorized payloads are rejected. |
+| Gateway delivery client | Add bounded in-memory pending recordings, request timeouts, retries, and observable failure/overflow handling. No durable outbox in v1. Keep the existing recording path until cutover. | Slow/unavailable ledger, lost acknowledgements, saturation, and restart-loss tests; no waiting on ingestion in the provider-streaming path. |
+| Storage cutover | Switch gateway recording to the ledger service and remove gateway database ownership. Decide and document import/preservation of existing SQLite history before switching. | Gateway needs no database credentials; real calls reach PostgreSQL with correct usage/flags; credential scrubbing leaves forwarded provider bytes unchanged; concurrent streaming tests pass. |
+| Ledger read API | Adapt PR #5's metadata selection, validation, pagination, errors, and tests to the separate ledger service with PostgreSQL. | Filtering, null/estimate semantics, safe JSON failures, and read/write authorization; dashboard reads never enter the gateway process. |
+| Docker local packaging | Add gateway/ledger images, Compose, health checks, configuration examples, and persistent PostgreSQL volumes. Reuse the native application entry points. | Run the same ingestion/read/outage scenarios natively and with Compose; restart/recreate services and verify committed data remains. |
+
+Native setup and commands are delivered with the ledger foundation, not held
+until the Docker PR. Do not make native scripts depend on a container database.
+The cloud milestone later reuses these images and delivery rules on separate
+instances. Independent horizontal gateway scaling is separate work because
+turn state and future budget counters need coordination.
+
+Treat PR #5's gateway-mounted SQLite API as a draft precursor, not the service
+boundary to merge. Its field selection, validation, errors, and tests are
+useful inputs to the ledger read API PR. Parser scenario recordings and other
+remaining parser follow-ups can proceed separately from this milestone.
+
 ### Phase 2 — Observability
 
 - Pinned price file and estimated USD cost per call (moved from Phase 1).
@@ -514,10 +662,312 @@ it was seen on.
   model's rates (calls flagged `fallback_usage_partial`).
 - OTel export to Langfuse (Docker Compose).
 - Custom dashboard: A, B, C, E.
-- Extend the gateway read API (started with the CLI) for the dashboard.
+- Frontend requirements and implementation order are defined below.
+- Deliver the separate ledger service and PostgreSQL transition, then extend
+  its read API for the dashboard and CLI. Support both native and Docker local
+  operation before deployment to separate cloud instances.
 - Quota tracking (C) uses only responses that carry quota headers. Responses
   without them (for example an upstream `429` with no
   `anthropic-ratelimit-unified-*` headers) are skipped, not read as zero.
+
+#### Frontend delivery plan — agreed 2026-11-16
+
+**Primary job:** answer “Why did this session use so many tokens?” Start with
+an overview, find a session, inspect its accumulation over time, and expand
+the turns and calls that explain it. Quota is supporting information.
+
+**Delivery boundary:** build the dashboard plus the read API, derived
+analysis, and storage needed to supply it. Make the Open WebUI changes in the
+existing local fork, **morpheus**, at `/Users/habiberton/projects/morpheus`.
+Keep the PostgreSQL ledger, owned by the ledger service, as the source of truth.
+Langfuse continues to handle general trace browsing under ADR 0003; seeit
+provides enough session, turn, call, and request-excerpt detail to complete a
+token investigation without leaving the dashboard. Full conversation replay
+remains outside this release. Langfuse availability must not block seeit.
+
+**Working baseline:** this plan was written in a separate worktree on branch
+`frontend-plan`, based on `2daa70f`. At that point there was no dashboard or
+read API. The ledger already stored usage, timing, session/turn identity,
+tool/instruction character counts, raw quota headers, and gzipped bodies.
+Other parser work is in progress: inspect and reuse it before implementation;
+do not build competing versions of those changes.
+
+**Architecture update:** the owner subsequently confirmed separate gateway
+and ledger services, PostgreSQL owned by the ledger, optional local Docker,
+and separate cloud instances. [PR #5](https://github.com/imranhabib/seeit.sh/pull/5)
+contains an initial SQLite read API mounted in the gateway; it does not yet
+implement this boundary. Reuse its metadata contract, validation, and tests
+while revising the implementation to run in `apps/ledger`. Do not merge the
+gateway-mounted design as the completed service architecture.
+
+##### Pages and navigation
+
+The Open WebUI sidebar has one **seeit** group with four links. The standalone
+dashboard exposes the same destinations and direct URLs. Proposed routes:
+
+| Page | Route | Content and main action |
+| --- | --- | --- |
+| Overview | `/overview` | Usage over time, quota summary, recent sessions, and evidence-backed findings; open a session or finding. |
+| Sessions | `/sessions` | Searchable, filtered session list; open a session's accumulation and call detail. |
+| Cache | `/cache` | Cache reuse and break findings; compare requests and inspect the first changed prefix. |
+| Quota | `/quota` | Reported windows, usage, resets, observation age, and qualified forecasts. |
+
+Session detail uses `/sessions/:sessionId` and call detail `/calls/:callId`.
+Include the harness in identity and API lookup where needed to avoid merging
+unrelated sessions with the same ID. Calls without session IDs remain
+inspectable and count in overall usage; never invent a session for them.
+
+Use time range, harness, and model filters where meaningful. Sessions also
+support finding/status filters and search by session ID or available label.
+Keep applicable filters in the URL so refresh, back navigation, and copied
+links preserve the investigation. Implementation defaults: Overview starts
+with the last 24 hours and both harnesses; lists start with the newest records.
+Do not apply a time filter to silently truncate the full history of a selected
+session. Paginate lists and fetch large detail views separately.
+
+Session detail contains:
+
+- A summary with usage, estimated API-equivalent cost when available, call
+  count, completion states, and data-quality information.
+- A cumulative token chart across calls, split into uncached input, cache
+  reads, cache writes, and output. Include background token use where linked;
+  keep background calls separate from user turns. Connectivity checks are
+  visible as diagnostics and do not inflate turn counts.
+- A per-call input chart showing tools, instructions, conversation content,
+  and unattributed content. This shows input size, not cumulative consumption.
+- An aligned event timeline for tool calls/results, cache changes, and
+  confirmed or inferred compaction. Selecting an event opens its call and
+  evidence. A size drop alone is only a possible compaction.
+- Expandable turn → call rows. Call detail shows usage, completion, model,
+  harness version, timings, category contributors, findings, and source
+  excerpts while bodies remain available.
+
+##### Accounting and evidence rules
+
+- Total input = uncached input + cache reads + cache writes. Reasoning tokens
+  are already part of output; show them as a subset, never add them again.
+  Cumulative usage measures tokens processed across requests, including
+  repeated context. It is not the number of unique tokens in a session.
+- Keep provider-reported usage separate from estimated composition. Categories
+  and contributors need a documented counting method, analysis version, and
+  confidence/source. Never present character counts as exact token counts or
+  silently force estimated slices to equal a reported total. Show an
+  unallocated difference when meaningful; otherwise show composition estimates
+  separately from the authoritative total.
+- Distinguish tool definitions (input), tool-call arguments (output), and tool
+  results included in later input. Attribute results to tool calls when IDs
+  permit it. Show each result's estimated size and its repeated contribution
+  to subsequent calls. These are separate measures and must not be summed as
+  extra usage on top of the call totals. Preserve unattributed content.
+- Expand category contributors to inspect individual tools, instruction
+  blocks, messages, and tool results. Attribute files, skills, and MCP servers
+  only when the captured request supports it. Do not infer precise ownership
+  from merged text or assign an entire model call's cost to one invoked tool.
+- Unknown usage stays unknown. Aggregates with missing contributions show
+  partial coverage, rather than presenting the known sum as complete. Label
+  estimates and parsing flags at call level and in affected aggregates.
+- Cache analysis compares compatible setups, including across sessions, since
+  the cache outlives a session. For Claude, compare the tools → system →
+  messages prefix against actual cache breakpoints. Name the comparison call,
+  first changed item, breakpoint, and observed reads/writes. Exclude metadata
+  that does not form part of the cached prompt. Distinguish expected git or
+  configuration changes from potentially avoidable changes. Do not assume
+  every zero-read call is a miss or every new write is preventable.
+- Provider support may differ. Unsupported cache explanations or compaction
+  signals must show their limitation; do not apply Claude's cache rules to
+  Codex. Inferred events carry their evidence and uncertainty.
+- Waste findings identify measurable patterns: large definitions, repeated
+  large results, potentially avoidable cache breaks, and interrupted calls
+  with usage. Rank by observed contribution where comparable; show the
+  evidence and affected calls. No universal waste score or unsupported claim
+  of recoverable savings. Size alone does not establish waste.
+- Cost always means estimated API-equivalent USD, never subscription spend.
+  Correct pricing needs cache-write lifetime splits and billable server-tool
+  counts from the Phase 1 follow-ups. Unknown models or missing pricing inputs
+  produce unavailable/partial estimates, never an apparent zero cost.
+- Label timings according to the events actually measured. Resolve the
+  existing first-token definition before calling it first visible answer
+  text. Prefill is approximate; Codex response-header time already includes
+  model time. Omit derived rates when their inputs are missing or invalid.
+
+##### Quota behavior
+
+Normalize each supported provider window without losing its source snapshot.
+Show reported usage, reset time, and observation time. Missing quota headers
+do not reset usage to zero; retain and age the last valid observation. Quota
+may include account activity outside this gateway, so do not attribute every
+quota change to a recorded session.
+
+Forecast from comparable observations within the same window/reset period.
+Never combine unrelated limits, cross a reset, or convert API-equivalent USD
+into quota. Show the sample interval and “at your recent usage rate.” With
+insufficient or stale observations, show the last known state and explain
+that a forecast is unavailable. Define minimum sample coverage and freshness
+rules with documented provider examples during implementation; test resets,
+missing headers, flat usage, and decreasing/corrected observations.
+
+##### Retention and ledger API
+
+Persist compact, versioned derived measurements and findings independently of
+raw bodies. Retain category/contributor measurements, safe tool labels,
+relationships, and event/finding metadata with call history after the 14-day
+body retention period. Raw content, excerpts, diffs, and copied source text
+must follow body retention; do not retain them indirectly in finding payloads.
+Older investigations keep charts and derived totals and explicitly show when
+source evidence has expired. Record analysis failures and coverage gaps.
+
+Analyze new calls in the ledger service after ingestion. Keep expensive
+analysis bounded so it does not starve recording writes or dashboard reads.
+Support an explicit, bounded backfill of still-retained bodies. Older rows
+without bodies or previously stored analysis show “analysis unavailable.”
+GET requests read stored results; they must not trigger unbounded body scans
+or recompute the full ledger on each refresh.
+
+Use the ledger service's read API for both dashboard and future CLI, under
+ADR 0007. Define its authenticated gateway-ingestion contract separately from
+browser read access. Start with plain typed responses and these read endpoints:
+
+| Endpoint family | Responsibility |
+| --- | --- |
+| `/api/overview` | Filtered aggregates, coverage, recent sessions, and findings. |
+| `/api/sessions` | Paginated sessions and summary metadata. |
+| `/api/sessions/:id` | Harness-qualified session totals and charts; paginated turns/calls as needed. |
+| `/api/calls` | Bounded call metadata list with filters and pagination. |
+| `/api/calls/:id` | Call metadata, composition, tool contributions, and findings. |
+| `/api/calls/:id/evidence` | Bounded, on-demand excerpts/diffs; explicit unavailable/expired state. |
+| `/api/cache` | Filtered, paginated cache comparisons and findings. |
+| `/api/quota` | Latest normalized windows, observations, and qualified forecasts. |
+
+Specify query parameters, pagination, null/estimate semantics, and error
+responses before wiring screens. No raw SQL endpoint. Do not expose stored
+headers or secrets through summary payloads. Request content remains sensitive
+and is loaded only when the user opens detail. Keep services loopback-bound
+by default and verify how the local browser runtime reaches them.
+
+##### Frontend behavior and Open WebUI integration
+
+- Use the planned Vite + React app in `apps/dashboard`. Keep frontend code
+  outside gateway watch paths so UI edits do not restart active streams.
+  Use a development proxy for `/api`; prefer one origin for the installed
+  dashboard and ledger API to simplify standalone and embedded access. Keep
+  dashboard reads out of the gateway process and support direct page reloads.
+- Use a compact, table-led desktop layout, dark by default, with clear
+  typography and restrained composition/time charts. Smaller windows remain
+  usable. Use keyboard-accessible controls, visible focus, chart legends,
+  and equivalent numeric detail; do not convey state through color alone.
+- Poll completed-call data on a modest interval, pause polling in hidden
+  views, and preserve filters, selection, and scroll position. Show the last
+  successful update and connection state. Keep existing data visible with a
+  stale indicator on failure. No live stream token counters in this release.
+- Distinguish loading, no recorded traffic, no filter matches, partial or
+  unsupported analysis, expired evidence, and API failure. An empty chart
+  must not imply measured zero usage.
+- Use the existing **morpheus** Open WebUI fork. Add **seeit** using the existing sidebar group
+  components and wire Overview, Sessions, Cache, and Quota links to browser
+  tabs displaying the same frontend URLs. Reuse/focus an existing destination
+  tab rather than creating duplicates. Tabs remain available across chat
+  switches and do not create artificial conversations.
+- Upstream browser tabs currently belong to chat workspaces. Persistent seeit
+  tabs therefore need an explicit application-level workspace in the fork;
+  preserve ordinary chat tab behavior. Reuse browser rendering rather than
+  copying the React dashboard into Open WebUI's Svelte frontend.
+- Pin the fork's upstream revision and document its maintenance patch. Verify
+  Proxy/Chrome browser mode compatibility and required Open Terminal support
+  against that revision. Choose the smallest supported rendering path after
+  a real integration check; do not assume iframe cookies, same-origin access,
+  or container access to host loopback will work automatically. Failure to
+  connect should show a useful error and the standalone URL.
+- First deployment is local, with Open WebUI, its browser runtime, and seeit
+  on the same host. Verify both native processes with native PostgreSQL and the
+  container stack. Test reachability from the actual browser runtime.
+  Remote/Tailscale deployment to separate instances is a later milestone.
+
+Upstream integration references, checked 2026-11-16:
+[v0.13.0 release notes](https://github.com/open-webui/open-webui/releases/tag/v0.13.0),
+[browser tab workspace](https://github.com/open-webui/open-webui/blob/main/src/lib/components/chat/ChatTabs.svelte),
+[browser renderer](https://github.com/open-webui/open-webui/blob/main/src/lib/components/chat/ChatTabs/Browser.svelte),
+and [sidebar](https://github.com/open-webui/open-webui/blob/main/src/lib/components/layout/Sidebar.svelte).
+The `main` links are discovery references; pin implementation references to
+the selected fork revision.
+
+##### Implementation stages and completion checks
+
+Each stage can contain several small PRs. After each PR, stop for a walkthrough
+of how to test it, the changed code, and the reason for the change. Keep storage
+migration, gateway delivery, deployment tooling, and UI slices separately
+reviewable. The full release includes A, B, C, and E plus both frontend access
+modes; early stages do not substitute for completion.
+
+The storage, delivery, native setup, and Docker foundation is defined in
+**Phase 1C — Ledger service and delivery** above. Frontend implementation uses
+that service boundary. Synthetic data can support early visual review, and a
+small Morpheus embedding proof should happen early to expose browser/network
+constraints before the full dashboard is built.
+
+1. **Confirm data contracts and the embedding path.** Reconcile ongoing
+   parser changes, identify remaining usage/pricing gaps, and extend the ledger
+   contracts with synthetic examples. In the separate
+   **morpheus** Open WebUI fork, prove a sidebar link can open a local page through the
+   selected browser mode and persist across chat switches. Verify a prototype
+   can fetch its API. Record the pinned revision and local network setup.
+   **Check:** no dependency on chat creation, no duplicate destination tabs,
+   and a documented contract for unknown, partial, and expired data.
+2. **Deliver the first usable investigation.** Add the dashboard shell,
+   Overview, Sessions, direct call routes, and read endpoints over existing
+   ledger fields. Add cumulative usage and turn/call tables, filtering,
+   pagination, and completed-call refresh. Prepare representative screen
+   states with synthetic data for visual review before expanding the charts.
+   **Check:** ledger totals reconcile across pages; calls without sessions
+   remain visible; refresh and browser navigation preserve the investigation.
+3. **Add composition and session events (A).** Implement provider-aware
+   analysis for categories, tool definitions/arguments/results, repeated input,
+   and evidence-backed compaction events. Persist derived results with a new
+   generated migration; add bounded backfill for available bodies. Complete
+   the per-call charts, contributor expansion, timeline, and evidence views.
+   **Check:** both harness formats are covered; missing identity stays
+   unattributed; estimates do not masquerade as reported totals; deleting
+   expired bodies preserves measurements and removes source excerpts.
+4. **Explain cache behavior and surface findings (B, E).** Implement
+   compatible-request selection, supported prefix/breakpoint comparison, and
+   expected-versus-potentially-avoidable findings. Complete Cache and findings
+   on Overview/session pages. Add accurate API-equivalent pricing after its
+   prerequisite parser fields and pinned prices are ready.
+   **Check:** worked examples from this plan distinguish a tool-definition
+   break from an expected git-snapshot break; cross-session reuse is handled;
+   unsupported explanations and missing prices remain explicit.
+5. **Complete Quota (C).** Normalize snapshots, show freshness/reset windows,
+   and add qualified forecasts with documented evidence requirements.
+   **Check:** missing headers preserve the last observation, resets do not
+   create false rates, and sparse/stale data produces no confident forecast.
+6. **Complete integration and release verification.** Finish all four sidebar
+   links and the persistent seeit workspace. Verify standalone deep links and
+   the actual local Open WebUI browser path. Check narrow layouts, keyboard
+   use, expired evidence, API outages/recovery, and large paginated sessions.
+   **Check:** one frontend serves both access modes, tabs survive chat changes,
+   and gateway streaming behavior remains intact.
+
+Use meaningful unit tests for accounting, attribution, cache comparisons,
+retention, and forecasts; API tests for filtering/pagination and data states;
+and browser checks for the investigation flow in both access modes. Follow
+ADR 0005 for provider examples and reviewed fixtures. Run `pnpm typecheck`
+and `pnpm test` for implementation changes, including the streaming integration
+test when touching the proxy path. Record failures owned by concurrent work
+separately; do not modify unrelated changes to make a frontend check pass.
+Ledger tests accept a configured PostgreSQL connection so they work with native
+or container databases. Add gateway-to-ledger fault tests and verify the proxy
+under concurrent recording and dashboard load; an isolated streaming test alone
+does not demonstrate that background work cannot delay the hot path.
+
+New runtime dependencies still require approval under the repo rules. Choose
+the minimum frontend dependencies needed for the agreed Vite + React stack;
+do not add a chart framework, state framework, or component suite by default.
+
+**Outside this release:** Open WebUI conversation ingestion, budget editing
+or enforcement, routing controls, retention settings, repo/branch attribution,
+subagent trees, full replay, mobile-specific workflows, live token counters,
+and remote deployment. These remain in their existing later phases where
+applicable. The delivered dashboard interface is read-only; the ledger service
+also exposes authenticated recording ingestion to the gateway.
 
 ### Phase 3 — Budgets and attribution
 
