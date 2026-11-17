@@ -246,6 +246,27 @@ describe("ledger", () => {
     expect(await call).toMatchObject({ kind: "connectivity", completion: "complete", httpStatus: 404, harnessVersion: null, turnId: null });
   });
 
+  // ADR 0005, layer 3: flag the first call from a harness version with no fixtures.
+  it("flags only the first call from an untested harness version, and stores drift as JSON", async () => {
+    const send = async () => {
+      const call = nextCall("POST", "/v1/messages?v=untested");
+      await (
+        await fetch(`${gatewayUrl}/claude/v1/messages?v=untested`, {
+          method: "POST",
+          headers: { "x-claude-code-session-id": "sess-untested", "user-agent": "claude-cli/0.0.1-untested (test)" },
+          body: JSON.stringify(claudeTurn),
+        })
+      ).text();
+      return call;
+    };
+    const first = await send();
+    const second = await send();
+    expect(JSON.parse(first.flags!)).toEqual(["untested_harness_version"]);
+    expect(JSON.parse(second.flags!)).toEqual([]);
+    expect(JSON.parse(first.unknownEvents!)).toEqual({});
+    expect(JSON.parse(first.unknownUsageFields!)).toEqual([]);
+  });
+
   it("estimates usage for a cut stream", async () => {
     const call = nextCall("POST", "/v1/messages?forever=1");
     const controller = new AbortController();

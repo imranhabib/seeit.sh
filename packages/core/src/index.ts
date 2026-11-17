@@ -3,3 +3,4 @@ export { createInterpreter, type Provider, type StreamInterpreter, type StreamSu
 export { readRequest, type CallKind, type ContextShape, type Harness, type RequestInfo } from "./request.ts";
 export { decideCompletion, type Completion } from "./completion.ts";
 export { estimateTokens, fromAnthropicUsage, fromOpenAIUsage, type Usage } from "./usage.ts";
+export { FIXTURE_FOR_VERSION, hasFixture } from "./tested-versions.ts";
