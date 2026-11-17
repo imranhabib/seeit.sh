@@ -620,6 +620,39 @@ it was seen on.
    (`cache_write_tokens`), so Phase 2 cost would underprice every Claude Code
    cache write. Fix in step 3 above.
 
+### Phase 1C — Ledger service and delivery (next)
+
+Complete the service boundary before moving dashboard reads onto it. Keep the
+existing gateway operational while the new ledger is built and tested. This
+milestone uses the latest parser fields from main, including nullable usage,
+cache writes by lifetime, server-tool use, and drift/completion flags.
+
+Each row is a separate PR; split further if its review or learning scope grows.
+After every PR, stop for a walkthrough of testing, code changes, reasons, and
+known limits. Do not combine PostgreSQL migration, gateway cutover, and UI
+changes in one PR.
+
+| PR slice | Result | Verification |
+| --- | --- | --- |
+| Architecture and contract requirements | Publish ADR 0007, service ownership, gateway-side credential scrubbing, read/write permissions, and ingestion acknowledgement/idempotency requirements. Specify v1 best-effort delivery and defer the durable outbox to v2. | Review success, duplicate, timeout, and failure scenarios; distinguish implemented behavior from the target architecture. |
+| PostgreSQL foundation | Add the standalone ledger package, native database setup, connection lifecycle, schema, and generated migrations. Preserve the latest parser fields and existing SQLite migration history. | Use a native PostgreSQL test database; store/read synthetic records and verify they remain after restart. No Docker requirement. |
+| Recording ingestion | Add the authenticated write endpoint, concrete recording payload/validation, and transactional idempotent writes. Scrub recording credentials before they leave the gateway; never send raw authorization headers. | Duplicate submissions count once; a successful acknowledgement follows commit; invalid or unauthorized payloads are rejected. |
+| Gateway delivery client | Add bounded in-memory pending recordings, request timeouts, retries, and observable failure/overflow handling. No durable outbox in v1. Keep the existing recording path until cutover. | Slow/unavailable ledger, lost acknowledgements, saturation, and restart-loss tests; no waiting on ingestion in the provider-streaming path. |
+| Storage cutover | Switch gateway recording to the ledger service and remove gateway database ownership. Decide and document import/preservation of existing SQLite history before switching. | Gateway needs no database credentials; real calls reach PostgreSQL with correct usage/flags; credential scrubbing leaves forwarded provider bytes unchanged; concurrent streaming tests pass. |
+| Ledger read API | Adapt PR #5's metadata selection, validation, pagination, errors, and tests to the separate ledger service with PostgreSQL. | Filtering, null/estimate semantics, safe JSON failures, and read/write authorization; dashboard reads never enter the gateway process. |
+| Docker local packaging | Add gateway/ledger images, Compose, health checks, configuration examples, and persistent PostgreSQL volumes. Reuse the native application entry points. | Run the same ingestion/read/outage scenarios natively and with Compose; restart/recreate services and verify committed data remains. |
+
+Native setup and commands are delivered with the ledger foundation, not held
+until the Docker PR. Do not make native scripts depend on a container database.
+The cloud milestone later reuses these images and delivery rules on separate
+instances. Independent horizontal gateway scaling is separate work because
+turn state and future budget counters need coordination.
+
+Treat PR #5's gateway-mounted SQLite API as a draft precursor, not the service
+boundary to merge. Its field selection, validation, errors, and tests are
+useful inputs to the ledger read API PR. Parser scenario recordings and other
+remaining parser follow-ups can proceed separately from this milestone.
+
 ### Phase 2 — Observability
 
 - Pinned price file and estimated USD cost per call (moved from Phase 1).
@@ -865,20 +898,11 @@ migration, gateway delivery, deployment tooling, and UI slices separately
 reviewable. The full release includes A, B, C, and E plus both frontend access
 modes; early stages do not substitute for completion.
 
-Complete these foundation PRs before expanding the frontend stages below:
-
-| PR slice | Result | Verification |
-| --- | --- | --- |
-| Architecture and contracts | Record ADR 0007, service ownership, gateway-side credential scrubbing, read/write permissions, and ingestion acknowledgement/idempotency semantics. Specify v1 best-effort delivery and defer the durable outbox to v2. | Review synthetic success, duplicate, timeout, and failure examples; recording credentials do not reach ledger payloads, logs, or local writes; no browser write credential. |
-| Ledger storage and ingestion | Add the standalone ledger entry point, PostgreSQL schema/migrations, and transactional recording ingestion. Document a native PostgreSQL setup. | Native database integration tests prove persistence, duplicate safety, and acknowledgement only after commit. |
-| Gateway delivery | Replace direct SQLite recording with the bounded in-memory HTTP delivery client; scrub recording credentials before transmission. Define queue limits and overflow handling, document restart loss, and handle existing-data cutover explicitly. No durable outbox in v1. | Slow/unavailable ledger, lost acknowledgements, saturation, restart loss, and credential-scrubbing tests; provider credentials pass through unchanged and first chunks still arrive before upstream finishes during concurrent delivery. |
-| Ledger read API | Move the initial metadata endpoints and tests from PR #5 into the ledger service; remove the API mount and database dependency from the gateway. | Filtering, pagination, null/estimate semantics, safe JSON errors, and read/write authorization against PostgreSQL. |
-| Local runtime modes | Add separate native startup commands, example configuration, gateway/ledger images, Compose, health checks, and persistent database volumes. | Run the same ingestion/read/outage scenarios with zero Docker dependencies and with Compose; restart/recreate services and confirm stored calls remain. |
-
-Keep these slices smaller if their diff or learning scope grows. New native
-mode scripts must not quietly require a container database. The cloud milestone
-reuses the images and delivery rules on separate instances; it is not a second
-implementation of the services.
+The storage, delivery, native setup, and Docker foundation is defined in
+**Phase 1C — Ledger service and delivery** above. Frontend implementation uses
+that service boundary. Synthetic data can support early visual review, and a
+small Morpheus embedding proof should happen early to expose browser/network
+constraints before the full dashboard is built.
 
 1. **Confirm data contracts and the embedding path.** Reconcile ongoing
    parser changes, identify remaining usage/pricing gaps, and extend the ledger

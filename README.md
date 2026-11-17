@@ -21,12 +21,67 @@ passes your credentials through unchanged and never stores them.
 | --- | --- | --- |
 | 0 | Recorder spike: pass-through proxy that records redacted traffic | ✅ done |
 | 1 | Stream parsing, usage, sessions and turns, SQLite ledger | ✅ done (cost estimates move to Phase 2) |
+| 1C | Separate ledger service, PostgreSQL, background HTTP delivery, native/Docker local operation | next |
 | 2 | Observability: Langfuse traces, custom dashboard | planned |
 | 3 | Budgets and blocking, repo attribution | planned |
 | 4 | Transforms, model router | planned |
 
 The full plan is in [docs/PLAN.md](docs/PLAN.md), and the key decisions are in
 [docs/adr/](docs/adr/).
+
+## Next architecture
+
+The next milestone separates the gateway from storage and dashboard work.
+Gateway, ledger, and dashboard stay in this monorepo, with gateway and ledger
+running as separate services. This is the agreed direction; the current code
+still records to local SQLite, and the quick start below runs that version.
+
+```text
+Claude Code / Codex ──▶ Gateway ──▶ Model provider
+                          │
+                          │ background HTTP recording
+                          ▼
+                      Ledger service ──▶ PostgreSQL
+                          ▲
+                          │ read-only HTTP access
+                   Dashboard / CLI
+```
+
+- **Gateway:** forwards raw traffic and streams provider responses immediately.
+  It scrubs credentials from recording copies before writing locally or sending
+  them to the ledger. Forwarded harness credentials remain unchanged.
+- **Ledger:** owns recording ingestion, PostgreSQL access, migrations, retention,
+  analysis, and read APIs. The gateway will have no PostgreSQL credentials.
+- **Dashboard:** explains session token accumulation, context composition,
+  cache behavior, and quota. It will work standalone and inside **Morpheus**,
+  our Open WebUI fork in a separate repository. Langfuse remains the planned
+  tool for general trace browsing.
+
+PostgreSQL is owned by the ledger service but runs as its own process or
+container. Planned runtime modes are:
+
+| Mode | Setup |
+| --- | --- |
+| Native local | Separate gateway and ledger Node processes plus locally installed PostgreSQL. Docker is not required. |
+| Docker local | Compose starts separate gateway, ledger, and PostgreSQL containers, with persistent database storage. |
+| Cloud | Gateway and ledger deploy to separate instances using private service addresses; PostgreSQL runs separately from the ledger process. |
+
+All modes use the same authenticated HTTP contract and recording-delivery
+rules. Recording never waits for the ledger on the provider-streaming path.
+V1 uses bounded in-memory pending recordings and retries; pending recordings
+can be lost on restart, retry exhaustion, or queue saturation. A durable local
+outbox and restart replay are deferred to v2. PostgreSQL persistence does not
+protect a recording that has not reached the ledger yet.
+
+Harnesses continue to point their base URL at the gateway. Docker and cloud
+deployment change service addresses, not this interface. Native local startup
+and Docker will use the same application entry points.
+
+See [ADR 0007](docs/adr/0007-ledger-service-and-postgres.md) for the decision and
+[the delivery sequence](docs/PLAN.md#phase-1c--ledger-service-and-delivery-next)
+for the small PRs that implement it. Each PR includes a testing and code
+walkthrough before the next slice starts. PostgreSQL, Docker, and ledger
+startup commands will be documented when those services are implemented.
 
 ## Quick start
 
@@ -62,6 +117,8 @@ Raw JSON recordings of each call are also written to `data/recordings/`
 
 ```
 apps/gateway     Hono proxy server (TypeScript, Node 24)
+apps/ledger      planned: standalone ledger service with PostgreSQL
+apps/dashboard   planned: Vite + React dashboard
 packages/core    shared parsers and helpers
 docs/            plan, ADRs, phase notes
 data/            local recordings and databases (git-ignored)
