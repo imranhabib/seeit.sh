@@ -678,7 +678,8 @@ the turns and calls that explain it. Quota is supporting information.
 
 **Delivery boundary:** build the dashboard plus the read API, derived
 analysis, and storage needed to supply it. Make the Open WebUI changes in the
-existing local fork, **morpheus**, at `/Users/habiberton/projects/morpheus`.
+existing local fork, **morpheus**, a sibling checkout of this repository
+(`../morpheus`).
 Keep the PostgreSQL ledger, owned by the ledger service, as the source of truth.
 Langfuse continues to handle general trace browsing under ADR 0003; seeit
 provides enough session, turn, call, and request-excerpt detail to complete a
