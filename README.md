@@ -80,8 +80,9 @@ and Docker will use the same application entry points.
 See [ADR 0007](docs/adr/0007-ledger-service-and-postgres.md) for the decision and
 [the delivery sequence](docs/PLAN.md#phase-1c--ledger-service-and-delivery-next)
 for the small PRs that implement it. Each PR includes a testing and code
-walkthrough before the next slice starts. PostgreSQL, Docker, and ledger
-startup commands will be documented when those services are implemented.
+walkthrough before the next slice starts. Native PostgreSQL and ledger startup
+are documented in [apps/ledger/README.md](apps/ledger/README.md).
+Ingestion, read APIs, and Docker startup remain planned.
 
 ## Quick start
 
@@ -117,7 +118,7 @@ Raw JSON recordings of each call are also written to `data/recordings/`
 
 ```
 apps/gateway     Hono proxy server (TypeScript, Node 24)
-apps/ledger      planned: standalone ledger service with PostgreSQL
+apps/ledger      PostgreSQL storage foundation and readiness endpoint
 apps/dashboard   planned: Vite + React dashboard
 packages/core    shared parsers and helpers
 docs/            plan, ADRs, phase notes
