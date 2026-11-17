@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -30,21 +31,29 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
   });
 
   afterAll(async () => {
-    await database?.close();
-    if (admin) {
+    // Nested so a failed step cannot skip dropping the test database.
+    try {
+      await database?.close();
+    } finally {
       try {
-        await admin.query(`DROP DATABASE IF EXISTS "${name}"`);
+        await admin?.query(`DROP DATABASE IF EXISTS "${name}"`);
       } finally {
-        await admin.end();
+        await admin?.end();
       }
     }
   });
 
   function call(id: string, overrides: Partial<CallRow> = {}): CallRow {
     return {
-      id, startedAt: new Date("2026-11-17T12:34:56.789Z"), harness: "claude",
-      kind: "turn", method: "POST", path: "/v1/messages", completion: "complete",
-      tokensEstimated: false, ...overrides,
+      id,
+      startedAt: new Date("2026-11-17T12:34:56.789Z"),
+      harness: "claude",
+      kind: "turn",
+      method: "POST",
+      path: "/v1/messages",
+      completion: "complete",
+      tokensEstimated: false,
+      ...overrides,
     };
   }
 
@@ -74,7 +83,15 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
       call("zero", { inputTokens: 0, outputTokens: 0, flags: [], unknownEvents: {}, unknownUsageFields: [] }),
     ]);
     const [unknown] = await database.db.select().from(calls).where(eq(calls.id, "unknown"));
-    expect(unknown).toMatchObject({ inputTokens: null, outputTokens: null, sessionId: null, quota: null, flags: null, unknownEvents: null, unknownUsageFields: null });
+    expect(unknown).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      sessionId: null,
+      quota: null,
+      flags: null,
+      unknownEvents: null,
+      unknownUsageFields: null,
+    });
     const [zero] = await database.db.select().from(calls).where(eq(calls.id, "zero"));
     expect(zero).toMatchObject({ inputTokens: 0, outputTokens: 0, flags: [], unknownEvents: {}, unknownUsageFields: [] });
   });
@@ -82,7 +99,12 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
   it("stores compressed Unicode bodies and enforces their call relationship", async () => {
     const request = "synthetic request: 你好 🌍";
     const response = "synthetic response: café";
-    const body = { callId: "with-body", createdAt: new Date("2026-11-17T12:34:56.789Z"), requestGz: gzipSync(request), responseGz: gzipSync(response) };
+    const body = {
+      callId: "with-body",
+      createdAt: new Date("2026-11-17T12:34:56.789Z"),
+      requestGz: gzipSync(request),
+      responseGz: gzipSync(response),
+    };
     await expect(database.db.insert(bodies).values(body)).rejects.toThrow();
     await database.db.insert(calls).values(call(body.callId));
     await database.db.insert(bodies).values(body);
@@ -97,9 +119,17 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
 
   it("preserves committed data across connections and reapplies migrations safely", async () => {
     await database.db.insert(calls).values(call("persistent"));
-    await database.close();
-    database = await openDatabase(connectionString);
-    expect(await database.db.select({ id: calls.id }).from(calls).where(eq(calls.id, "persistent"))).toEqual([{ id: "persistent" }]);
+    // A second open runs the migrations again on a database that has them.
+    const reopened = await openDatabase(connectionString);
+    try {
+      const rows = await reopened.db.select({ id: calls.id }).from(calls).where(eq(calls.id, "persistent"));
+      expect(rows).toEqual([{ id: "persistent" }]);
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it("reports ready without caching when the database answers", async () => {
     const response = await createApp(database).request("/health");
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -115,10 +145,21 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
   });
 
   it("closes database connections when HTTP startup fails", async () => {
-    await expect(promisify(execFile)(process.execPath, ["--import", "tsx", "src/index.ts"], {
-      cwd: fileURLToPath(new URL("../..", import.meta.url)),
-      env: { ...process.env, SEEIT_LEDGER_DATABASE_URL: connectionString, SEEIT_LEDGER_PORT: "invalid" },
-      timeout: 4000,
-    })).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("[ledger] startup failed") });
+    // Occupy a port so the ledger's listen fails after the database is open.
+    // If the pool stayed open the child would idle until the timeout kills it.
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+    const { port } = blocker.address() as { port: number };
+    try {
+      await expect(
+        promisify(execFile)(process.execPath, ["--import", "tsx", "src/index.ts"], {
+          cwd: fileURLToPath(new URL("../..", import.meta.url)),
+          env: { ...process.env, SEEIT_LEDGER_DATABASE_URL: connectionString, SEEIT_LEDGER_PORT: String(port) },
+          timeout: 4000,
+        }),
+      ).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("[ledger] HTTP server failed") });
+    } finally {
+      blocker.close();
+    }
   }, 10000);
 });

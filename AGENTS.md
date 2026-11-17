@@ -19,6 +19,7 @@ non-obvious reason (a protocol detail, a performance rule).
 
 ```
 apps/gateway     Hono proxy server (TypeScript, Node 24)
+apps/ledger      ledger service with PostgreSQL storage (ADR 0007)
 packages/core    shared parsers and helpers, imported as @seeit/core
 docs/            plan and ADRs
 data/            local recordings and databases (git-ignored, never commit)
@@ -35,13 +36,18 @@ pnpm typecheck        # tsc --noEmit for all packages
 pnpm dev              # run the gateway on 127.0.0.1:8787
 pnpm summarize        # summarize recordings in data/recordings
 pnpm --filter @seeit/gateway db:generate   # new SQL migration after a schema change
+pnpm --filter @seeit/ledger db:generate    # same, for the PostgreSQL ledger
+pnpm --filter @seeit/ledger test:db        # PostgreSQL tests; needs SEEIT_TEST_DATABASE_URL
 ```
 
 Run `pnpm typecheck` and `pnpm test` before you say a change is done.
 
-The ledger schema is `apps/gateway/src/db/schema.ts`. After changing it, run
-`db:generate` and commit the new file in `apps/gateway/drizzle/`. Never edit a
-migration that is already committed; add a new one.
+There are two ledger schemas until the cutover in ADR 0007. The gateway still
+records to SQLite with `apps/gateway/src/db/schema.ts`. The new ledger service
+uses PostgreSQL with `apps/ledger/src/db/schema.ts`; see
+[apps/ledger/README.md](apps/ledger/README.md). After changing a schema, run
+that package's `db:generate` and commit the new file in its `drizzle/`
+directory. Never edit a migration that is already committed; add a new one.
 
 ## Hot path rules (do not break these)
 

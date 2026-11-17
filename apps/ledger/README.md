@@ -43,8 +43,10 @@ curl -i http://127.0.0.1:8788/health
 Expect 200 with `{"status":"ready"}` and `Cache-Control: no-store`. The process
 starts listening only after migrations succeed. Later database failures return
 503 with `{"status":"unavailable"}`. Logs/responses do not print database URLs,
-SQL, passwords, or exception details. A startup failure exits unsuccessfully;
-check the database connection and migration setup separately.
+SQL, passwords, or exception details. A missing database URL or an invalid
+port exits with a message that names the setting. Any other startup failure
+exits with a generic message; check the database connection and migration
+setup separately.
 
 | Setting | Purpose | Default |
 | --- | --- | --- |
@@ -112,8 +114,10 @@ Coverage includes all metadata fields, wide counters, fractional timings,
 null/zero distinctions, structured JSON, gzip Unicode bodies, foreign-key and
 primary-key constraints, cascade deletion, connection reopen/migration replay,
 and healthy/unavailable readiness responses.
-The suite also starts a child process with an invalid HTTP port and checks that
-startup failure closes database connections instead of leaving the process idle.
+The suite also starts a child process on a port that is already in use and
+checks that the HTTP failure closes database connections instead of leaving the
+process idle. `src/index.test.ts` checks the configuration messages and needs
+no PostgreSQL server.
 
 For a manual persistence check, insert a synthetic row through `psql`:
 

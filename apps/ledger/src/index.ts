@@ -2,17 +2,34 @@ import { serve } from "@hono/node-server";
 import { createApp } from "./app.ts";
 import { openDatabase } from "./db/database.ts";
 
-async function main() {
+// Configuration messages are our own text, so they are safe to print.
+// Database errors are not: they can contain the connection URL.
+function configError(message: string): never {
+  console.error(`[ledger] ${message}`);
+  process.exit(1);
+}
+
+function readConfig() {
   const connectionString = process.env.SEEIT_LEDGER_DATABASE_URL;
-  if (!connectionString) throw new Error("SEEIT_LEDGER_DATABASE_URL is required");
+  if (!connectionString) configError("SEEIT_LEDGER_DATABASE_URL is required");
+  // Number("") is 0, which makes the server listen on a random port, so
+  // accept digits only.
+  const portText = process.env.SEEIT_LEDGER_PORT ?? "8788";
+  const port = Number(portText);
+  if (!/^\d+$/.test(portText) || port < 1 || port > 65535) {
+    configError("SEEIT_LEDGER_PORT must be an integer from 1 to 65535");
+  }
+  return { connectionString, port, hostname: process.env.SEEIT_LEDGER_HOST ?? "127.0.0.1" };
+}
+
+async function main() {
+  const { connectionString, port, hostname } = readConfig();
   const database = await openDatabase(connectionString);
   let server: ReturnType<typeof serve>;
   try {
-    server = serve({
-      fetch: createApp(database).fetch,
-      hostname: process.env.SEEIT_LEDGER_HOST ?? "127.0.0.1",
-      port: Number(process.env.SEEIT_LEDGER_PORT ?? 8788),
-    }, (info) => console.log(`seeit ledger on http://${info.address}:${info.port}`));
+    server = serve({ fetch: createApp(database).fetch, hostname, port }, (info) =>
+      console.log(`seeit ledger on http://${info.address}:${info.port}`),
+    );
   } catch (err) {
     await database.close();
     throw err;
