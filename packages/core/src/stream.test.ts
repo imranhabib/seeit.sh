@@ -102,6 +102,37 @@ describe("openai responses interpreter", () => {
   });
 });
 
+// Drift detection (ADR 0005, layer 3; PLAN.md follow-up step 1).
+describe("unknown events and usage fields", () => {
+  it.each([
+    ["anthropic", CLAUDE],
+    ["openai-responses", CODEX_153],
+    ["openai-responses", CODEX_169],
+  ] as const)("finds none in the %s fixture", (provider, text) => {
+    const s = run(provider, text);
+    expect(s.unknownEvents).toEqual({});
+    expect(s.unknownUsageFields).toEqual([]);
+  });
+
+  it("counts Anthropic event types and lists usage fields it does not know", () => {
+    const extra =
+      'event: brand_new\ndata: {"type":"brand_new"}\n\n' +
+      'event: brand_new\ndata: {"type":"brand_new"}\n\n' +
+      'event: message_delta\ndata: {"type":"message_delta","delta":{},"usage":{"output_tokens":40,"new_counter":3}}\n\n';
+    const s = run("anthropic", before(CLAUDE, "message_stop") + extra);
+    expect(s.unknownEvents).toEqual({ brand_new: 2 });
+    expect(s.unknownUsageFields).toEqual(["new_counter"]);
+  });
+
+  it("counts OpenAI Responses event types and lists usage fields it does not know", () => {
+    const extra = 'event: response.brand_new\ndata: {"type":"response.brand_new"}\n\n';
+    const text = before(CODEX_169, "response.completed") + extra + CODEX_169.slice(CODEX_169.indexOf("event: response.completed\n")).replace('"usage":{', '"usage":{"new_counter":1,');
+    const s = run("openai-responses", text);
+    expect(s.unknownEvents).toEqual({ "response.brand_new": 1 });
+    expect(s.unknownUsageFields).toEqual(["new_counter"]);
+  });
+});
+
 describe("decideCompletion", () => {
   const base = { status: 200, isStream: true, final: false, errorType: null, clientAborted: false, readFailed: false, gatewayFailed: false, connectivityCheck: false };
 

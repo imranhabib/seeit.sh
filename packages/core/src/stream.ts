@@ -3,6 +3,7 @@
 // model, usage, whether the final event arrived, errors, and when the first
 // model output arrived.
 
+import { ANTHROPIC_EVENTS, ANTHROPIC_USAGE_FIELDS, OPENAI_RESPONSES_EVENTS, OPENAI_USAGE_FIELDS } from "./known.ts";
 import type { SseEvent } from "./sse.ts";
 import { estimateTokens, fromAnthropicUsage, fromOpenAIUsage, type Usage } from "./usage.ts";
 
@@ -20,6 +21,10 @@ export type StreamSummary = {
   timeToFirstTokenMs: number | null;
   /** Characters of model output received. Used to estimate output tokens. */
   outputChars: number;
+  /** Event types not in known.ts, with how often each arrived. Drift signal. */
+  unknownEvents: Record<string, number>;
+  /** Top-level usage fields not in known.ts. Drift signal. */
+  unknownUsageFields: string[];
 };
 
 export type StreamInterpreter = {
@@ -41,7 +46,7 @@ function parse(data: string): Json | null {
   }
 }
 
-function base() {
+function base(knownEvents: Set<string>, knownUsageFields: Set<string>) {
   const s: StreamSummary = {
     model: null,
     usage: null,
@@ -49,6 +54,17 @@ function base() {
     errorType: null,
     timeToFirstTokenMs: null,
     outputChars: 0,
+    unknownEvents: {},
+    unknownUsageFields: [],
+  };
+  // Drift: remember what we do not know, but keep parsing (fail-soft).
+  const noteEvent = (type: string) => {
+    if (!knownEvents.has(type)) s.unknownEvents[type] = (s.unknownEvents[type] ?? 0) + 1;
+  };
+  const noteUsage = (usage: Json) => {
+    for (const field of Object.keys(usage)) {
+      if (!knownUsageFields.has(field) && !s.unknownUsageFields.includes(field)) s.unknownUsageFields.push(field);
+    }
   };
   const onDelta = (text: unknown, atMs: number) => {
     s.timeToFirstTokenMs ??= atMs;
@@ -61,16 +77,16 @@ function base() {
     if (s.final || !s.usage) return { ...s };
     return {
       ...s,
-      usage: { ...s.usage, outputTokens: Math.max(s.usage.outputTokens, estimateTokens(s.outputChars)), estimated: true },
+      usage: { ...s.usage, outputTokens: Math.max(s.usage.outputTokens ?? 0, estimateTokens(s.outputChars)), estimated: true },
     };
   };
-  return { s, onDelta, summary };
+  return { s, onDelta, noteEvent, noteUsage, summary };
 }
 
 // Anthropic Messages: message_start → (content_block_start, content_block_delta*,
 // content_block_stop)* → message_delta → message_stop
 function anthropic(): StreamInterpreter {
-  const { s, onDelta, summary } = base();
+  const { s, onDelta, noteEvent, noteUsage, summary } = base(ANTHROPIC_EVENTS, ANTHROPIC_USAGE_FIELDS);
   // message_delta carries cumulative totals but may omit input fields, so
   // merge the raw objects and normalize the result.
   let raw: Json = {};
@@ -78,10 +94,14 @@ function anthropic(): StreamInterpreter {
     onEvent(e, atMs) {
       const d = parse(e.data);
       if (!d) return;
+      noteEvent(d.type ?? e.event ?? "(no type)");
       switch (d.type) {
         case "message_start":
           s.model = d.message?.model ?? null;
-          if (d.message?.usage) s.usage = fromAnthropicUsage((raw = { ...d.message.usage }));
+          if (d.message?.usage) {
+            noteUsage(d.message.usage);
+            s.usage = fromAnthropicUsage((raw = { ...d.message.usage }));
+          }
           break;
         case "content_block_delta": {
           const delta = d.delta ?? {};
@@ -89,7 +109,10 @@ function anthropic(): StreamInterpreter {
           break;
         }
         case "message_delta":
-          if (d.usage) s.usage = fromAnthropicUsage((raw = { ...raw, ...d.usage }));
+          if (d.usage) {
+            noteUsage(d.usage);
+            s.usage = fromAnthropicUsage((raw = { ...raw, ...d.usage }));
+          }
           break;
         case "message_stop":
           s.final = true;
@@ -105,12 +128,13 @@ function anthropic(): StreamInterpreter {
 
 // OpenAI Responses (Codex): response.created → … *.delta … → response.completed
 function openaiResponses(): StreamInterpreter {
-  const { s, onDelta, summary } = base();
+  const { s, onDelta, noteEvent, noteUsage, summary } = base(OPENAI_RESPONSES_EVENTS, OPENAI_USAGE_FIELDS);
   return {
     onEvent(e, atMs) {
       const d = parse(e.data);
       if (!d) return;
       const type: string = d.type ?? e.event ?? "";
+      noteEvent(type || "(no type)");
       if (type === "response.created") {
         s.model = d.response?.model ?? null;
       } else if (type.endsWith(".delta")) {
@@ -121,7 +145,10 @@ function openaiResponses(): StreamInterpreter {
         // but the stream itself finished normally and includes usage.
         s.final = true;
         s.model = d.response?.model ?? s.model;
-        if (d.response?.usage) s.usage = fromOpenAIUsage(d.response.usage);
+        if (d.response?.usage) {
+          noteUsage(d.response.usage);
+          s.usage = fromOpenAIUsage(d.response.usage);
+        }
       } else if (type === "response.failed" || type === "error") {
         s.errorType = d.response?.error?.code ?? d.error?.code ?? d.code ?? type;
       }

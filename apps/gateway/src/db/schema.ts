@@ -42,6 +42,15 @@ export const calls = sqliteTable(
 
     /** Plan-quota response headers as JSON, or null when the response had none. */
     quota: text("quota"),
+
+    // Drift detection (ADR 0005, layer 3). All JSON. Null on rows recorded
+    // before these checks existed; "[]" / "{}" means checked, nothing found.
+    /** Broken invariants, for example ["complete_without_usage"]. See src/flags.ts. */
+    flags: text("flags"),
+    /** Event types not in packages/core/src/known.ts, with counts: {"type": n}. */
+    unknownEvents: text("unknown_events"),
+    /** Top-level usage fields not in packages/core/src/known.ts: ["field"]. */
+    unknownUsageFields: text("unknown_usage_fields"),
   },
   (t) => [index("calls_started_at").on(t.startedAt), index("calls_session").on(t.sessionId, t.startedAt)],
 );
