@@ -2,6 +2,11 @@
 
 **Status:** accepted
 
+The SQLite storage choice is superseded by
+[ADR 0007](0007-ledger-service-and-postgres.md). The decision to keep a ledger
+alongside Langfuse general trace browsing remains in force. The text below
+records the original Phase 1 decision.
+
 ## Decision
 
 The gateway has two outputs:
