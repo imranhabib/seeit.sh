@@ -27,6 +27,8 @@ export const calls = sqliteTable(
     outputTokens: integer("output_tokens"),
     reasoningTokens: integer("reasoning_tokens"),
     codexRolloutBudgetUnits: real("codex_rollout_budget_units"), // Codex only; meaning undocumented
+    /** Anthropic usage.server_tool_use as JSON, for example {"web_search_requests":1}. Billed per use. Null when not reported. */
+    serverToolUse: text("server_tool_use"),
     tokensEstimated: integer("tokens_estimated", { mode: "boolean" }).notNull(),
 
     // Timings in ms since the gateway received the request (PLAN.md, "Timings per call").

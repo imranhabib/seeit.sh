@@ -39,6 +39,47 @@ describe("callFlags", () => {
   });
 });
 
+// What the stream itself showed (StreamSummary fields). A normal stream: no flags.
+const stream = {
+  startModel: "claude-opus-5-5",
+  model: "claude-opus-5-5",
+  fallback: false,
+  startInputTokens: 10,
+  serverToolUse: null,
+  serverToolSeen: false,
+};
+
+describe("callFlags: stream rules (PLAN.md follow-up step 2)", () => {
+  it("has no flags for a normal stream", () => {
+    expect(callFlags(ok, stream)).toEqual([]);
+  });
+
+  it("flags a model change that no fallback explains", () => {
+    expect(callFlags(ok, { ...stream, model: "claude-opus-4-8" })).toEqual(["model_changed_without_fallback"]);
+  });
+
+  // The top-level usage covers only the serving model; earlier attempts are
+  // billed too but only listed in usage.iterations (refusals-and-fallback docs).
+  it("flags a fallback, whose usage leaves out the declined attempts", () => {
+    // A different model also explains a different input count, so only one flag.
+    expect(callFlags(ok, { ...stream, model: "claude-opus-4-8", fallback: true, startInputTokens: 535 })).toEqual(["fallback_usage_partial"]);
+  });
+
+  it("flags input that changed during the stream with no server tool", () => {
+    expect(callFlags(ok, { ...stream, startInputTokens: 4 })).toEqual(["input_changed_without_server_tool"]);
+    expect(callFlags(ok, { ...stream, startInputTokens: 4, serverToolSeen: true })).toEqual([]);
+    expect(callFlags(ok, { ...stream, startInputTokens: 4, serverToolUse: { web_search_requests: 1 } })).toEqual([]);
+  });
+
+  it("checks input change only on complete calls, where the final count is known", () => {
+    expect(callFlags({ ...ok, completion: "client_aborted", tokensEstimated: true }, { ...stream, startInputTokens: 4 })).toEqual([]);
+  });
+
+  it("skips rules whose data is missing (Codex has no start input count)", () => {
+    expect(callFlags(ok, { ...stream, startModel: null, startInputTokens: null })).toEqual([]);
+  });
+});
+
 describe("createVersionCheck", () => {
   const row = (id: string, harnessVersion: string, flags: string | null) => ({
     id,

@@ -1,0 +1,1 @@
+ALTER TABLE `calls` ADD `server_tool_use` text;
