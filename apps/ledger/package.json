@@ -1,0 +1,23 @@
+{
+  "name": "@seeit/ledger",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc -p .",
+    "db:generate": "drizzle-kit generate",
+    "test:db": "tsx scripts/test-db.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.8",
+    "drizzle-orm": "^0.45.4",
+    "hono": "^4.13.18",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.11",
+    "tsx": "^4.23.15"
+  }
+}
