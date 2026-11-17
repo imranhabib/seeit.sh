@@ -38,6 +38,7 @@ describe("anthropic interpreter", () => {
       cacheWriteTokens: 154,
       outputTokens: 37,
       reasoningTokens: 0,
+      codexRolloutBudgetUnits: null,
       estimated: false,
     });
     expect(s.timeToFirstTokenMs).toBeGreaterThan(0);
@@ -84,6 +85,15 @@ describe("openai responses interpreter", () => {
     expect(s.timeToFirstTokenMs).toBeGreaterThan(0);
   });
 
+  // Field from codex-rs/codex-api/src/sse/responses.rs (ResponseCompletedUsage) at
+  // openai/codex@9537934ed6d5a6658fc77032b3290650765466a1. Our fixtures predate it.
+  it("reads codex_rollout_budget_units when present, and null when missing", () => {
+    const withUnits = CODEX_169.replace('"usage":{', '"usage":{"codex_rollout_budget_units":2.5,');
+    expect(withUnits).not.toBe(CODEX_169);
+    expect(run("openai-responses", withUnits).usage?.codexRolloutBudgetUnits).toBe(2.5);
+    expect(run("openai-responses", CODEX_169).usage?.codexRolloutBudgetUnits).toBeNull();
+  });
+
   it("has no usage when the stream is cut before response.completed", () => {
     const s = run("openai-responses", before(CODEX_169, "response.completed"));
     expect(s.final).toBe(false);
@@ -93,7 +103,7 @@ describe("openai responses interpreter", () => {
 });
 
 describe("decideCompletion", () => {
-  const base = { status: 200, isStream: true, final: false, errorType: null, clientAborted: false, readFailed: false, gatewayFailed: false };
+  const base = { status: 200, isStream: true, final: false, errorType: null, clientAborted: false, readFailed: false, gatewayFailed: false, connectivityCheck: false };
 
   it("is complete when the final event arrived, even if the connection then closed (Codex)", () => {
     expect(decideCompletion({ ...base, final: true, clientAborted: true, readFailed: true })).toBe("complete");
@@ -112,6 +122,11 @@ describe("decideCompletion", () => {
   });
   it("is complete for a non-streaming body read to the end", () => {
     expect(decideCompletion({ ...base, isStream: false })).toBe("complete");
+  });
+  // PLAN.md, live-run finding 1: Claude Code 2.1.133's HEAD /claude gets a 404. Any answer means the check worked.
+  it("is complete for a connectivity check that got any answer, even a 404", () => {
+    expect(decideCompletion({ ...base, connectivityCheck: true, isStream: false, status: 404 })).toBe("complete");
+    expect(decideCompletion({ ...base, connectivityCheck: true, isStream: false, status: null })).toBe("upstream_dropped");
   });
   it("is gateway_error when the gateway itself failed", () => {
     expect(decideCompletion({ ...base, final: true, gatewayFailed: true })).toBe("gateway_error");

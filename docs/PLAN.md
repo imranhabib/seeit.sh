@@ -370,9 +370,14 @@ it.
    - Store tool count and tools size per harness version, so a version that
      changes them shows as expected drift, not a bug (finding 3).
    - Fix the Codex gaps found in `codex-rs/codex-api/src/rate_limits.rs`: the
-     quota regex misses per-limit headers (`x-codex-<limit>-primary-*`),
-     `x-codex-rate-limit-reached-type`, and `x-codex-promo-message`; usage
-     field `codex_rollout_budget_units` is not read.
+     quota regex misses per-limit headers (`x-<limit_id>-primary-*` and
+     `-secondary-*`, for example `x-codex-other-primary-used-percent` for
+     limit `codex_other`; plus `x-<limit_id>-limit-name`), the
+     `x-codex-credits-*` headers, `x-codex-rate-limit-reached-type`, and
+     `x-codex-promo-message`; usage field `codex_rollout_budget_units` is not
+     read. The server also sends window headers the client does not read
+     (`x-codex-primary-reset-after-seconds`,
+     `x-codex-primary-over-secondary-limit-percent`); keep those too.
 2. **Spec-derived tests (layer 1)** for the five streaming gaps above, plus
    several `message_delta` events and mid-stream errors. Each test links its
    source (docs page, SDK type, or Codex source file at a pinned commit).

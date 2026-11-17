@@ -16,7 +16,7 @@ export function createTurnTracker() {
 
   return {
     turnFor(info: RequestInfo): string | null {
-      if (info.kind === "background") return null;
+      if (info.kind !== "turn") return null;
       if (info.explicitTurnId) return info.explicitTurnId;
       if (!info.sessionId) return null;
       if (info.startsNewTurn || !current.has(info.sessionId)) current.set(info.sessionId, randomUUID());

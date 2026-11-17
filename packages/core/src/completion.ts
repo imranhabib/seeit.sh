@@ -14,8 +14,11 @@ export function decideCompletion(c: {
   clientAborted: boolean;
   readFailed: boolean;
   gatewayFailed: boolean;
+  /** A HEAD connectivity check. Any answer, even a 404, means it worked. */
+  connectivityCheck: boolean;
 }): Completion {
   if (c.gatewayFailed) return "gateway_error";
+  if (c.connectivityCheck && c.status !== null) return "complete";
   if (c.final) return "complete";
   if (c.errorType || (c.status !== null && c.status >= 400)) return "upstream_error";
   if (c.clientAborted) return "client_aborted";

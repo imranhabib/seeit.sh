@@ -84,13 +84,27 @@ export function usageFromJsonBody(harness: Harness, text: string): Usage | null 
   }
 }
 
-const QUOTA_HEADER = /^(anthropic-ratelimit-unified-|x-codex-(primary|secondary)-|x-codex-plan-type$|x-codex-active-limit$)/;
+// Codex header names follow codex-rs/codex-api/src/rate_limits.rs. Besides
+// the default "codex" family, the server can send one family per metered
+// limit, named after the limit ID: x-<limit_id>-primary-used-percent, ...
+// (limit "codex_other" -> x-codex-other-...). The server also sends window
+// headers the Codex client does not read (x-codex-primary-reset-after-seconds,
+// x-codex-primary-over-secondary-limit-percent, seen live 2026-11-16), so any
+// suffix after -primary- / -secondary- is kept. Every pattern needs a quota
+// word, so unrelated x-... headers (request IDs, account IDs) are not stored.
+const QUOTA_HEADERS = [
+  /^anthropic-ratelimit-unified-/,
+  /^x-[a-z0-9-]+-(primary|secondary)-[a-z0-9-]+$/,
+  /^x-[a-z0-9-]+-limit-name$/,
+  /^x-codex-credits-(has-credits|unlimited|balance)$/,
+  /^x-codex-(plan-type|active-limit|rate-limit-reached-type|promo-message)$/,
+];
 
 /** Plan-quota headers as a JSON string, or null when the response has none (PLAN.md, Phase 2). */
 export function quotaHeaders(headers: Headers): string | null {
   const quota: Record<string, string> = {};
   headers.forEach((value, name) => {
-    if (QUOTA_HEADER.test(name)) quota[name] = value;
+    if (QUOTA_HEADERS.some((pattern) => pattern.test(name))) quota[name] = value;
   });
   return Object.keys(quota).length ? JSON.stringify(quota) : null;
 }

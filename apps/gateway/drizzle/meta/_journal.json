@@ -8,6 +8,13 @@
       "when": 1794617457115,
       "tag": "0000_fuzzy_naoko",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1794880799743,
+      "tag": "0001_parallel_absorbing_man",
+      "breakpoints": true
     }
   ]
 }
