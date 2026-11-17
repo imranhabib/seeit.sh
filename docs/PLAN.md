@@ -153,6 +153,65 @@ These rules are the performance-critical part of the system:
   connections during long model pauses (for example nginx closes after 60 s of
   no data by default). Raise its read timeout and turn off response buffering.
 
+### CLI
+
+A `seeit` command for running and inspecting the gateway from a terminal. It
+replaces the ad-hoc tools used so far: the `q()` sqlite3 helper,
+`pnpm summarize`, and calling `make-fixture.ts` by hand. The dashboard is for
+browsing and charts; the CLI is for quick answers and scripting.
+
+**Naming rule.** Commands follow the data model (Session → Turn → Call). A
+plural noun lists (`calls`), a singular noun shows one (`call <id>`).
+
+| Command | What it answers | Phase |
+| --- | --- | --- |
+| `seeit start` | Run the gateway (later: as the `launchd` service) | 1 |
+| `seeit status` | Is the gateway up, which database, is each harness pointed at it | 1 |
+| `seeit setup claude\|codex` | Print the base-URL settings for a harness | 1 |
+| `seeit sessions [--harness --since]` | Recent sessions | 1 |
+| `seeit session <id>` | Turn → call tree with tokens, cache, flags (subagents with F) | 1, then 3 |
+| `seeit calls [--session --kind --flagged]` | Recent calls | 1 |
+| `seeit call <id> [--request --response]` | Timings, usage, completion, flags; stored bodies for debugging (context breakdown with A) | 1, then 2 |
+| `seeit drift` | Unknown event types, usage fields, and invariant flags per harness version | 1 (follow-up 1) |
+| `seeit fixture <call-id\|session-id> -o <file>` | Redacted test fixture from the ledger | 1 (follow-ups 4–5) |
+| `seeit sql "<select>"` | Read-only escape hatch for any other question | 1 |
+| `seeit usage [--by day\|harness\|model] [--since]` | Tokens and estimated USD | 2 |
+| `seeit quota` | Plan-quota use and forecast (C) | 2 |
+| `seeit prices update` | Refresh the pinned price file on purpose (never at runtime) | 2 |
+| `seeit budget [set ...]` | Show or set budgets, and what was blocked | 3 |
+
+**Terms.**
+
+- A *call* is one HTTP request to the model, not a turn. One turn usually has
+  several calls (each tool loop is a new call), and background calls belong to
+  no turn.
+- A *fixture* is test input: a response stream (or, for a scenario, a
+  session's request/response pairs) that is redacted and reviewed by hand
+  before it is committed. `seeit call <id> --response` shows the stored
+  response for debugging and is **not** redacted for the repo. The two are
+  separate commands so debug output is not committed by mistake.
+
+**Decisions.**
+
+- **The CLI reads through the gateway's read API, not the SQLite file.** The
+  gateway will later run on a private server, where the ledger is not on the
+  laptop. The Phase 2 dashboard needs the same API, so both share it. The
+  first CLI commands bring the first read endpoints; the dashboard extends
+  them. Write an ADR for this before building the CLI.
+- **`seeit sql` is the exception.** It opens the local database read-only and
+  is never exposed over the network: raw SQL over HTTP is risk with no benefit.
+- **`seeit fixture` keeps the hand review.** It writes to a file and prints a
+  reminder that the repo is public; it never writes into the test folders
+  itself.
+- **No new dependency for argument parsing.** Use Node's built-in
+  `util.parseArgs`.
+- **Developer tasks stay in the `justfile`** (`just reset`, `just test`). The
+  CLI is for operating and inspecting the gateway, not for working on its
+  code.
+- **Build order:** `calls`, `call`, `sessions`, `session`, `sql` first. They
+  replace `q()` right away. The rest arrive with the phase that adds their
+  data.
+
 ## Stack
 
 TypeScript on Node 24 LTS with Hono ([ADR 0002](adr/0002-typescript-node-hono.md)).
@@ -160,6 +219,7 @@ TypeScript on Node 24 LTS with Hono ([ADR 0002](adr/0002-typescript-node-hono.md
 ```
 apps/gateway      Hono proxy server
 apps/dashboard    Vite + React custom dashboard (Phase 2)
+apps/cli          `seeit` command (see *CLI*)
 packages/core     shared parsers, schema, pricing
 infra/            Docker Compose for Langfuse, launchd plist
 docs/             this plan, ADRs
@@ -301,6 +361,14 @@ it.
      `message_start` and `message_delta` with no server tool use; estimated
      tokens on a `complete` call.
    - Flag the first call from a harness version that has no fixtures.
+   - Label connectivity checks as their own kind (not `background`) with no
+     failure status: a `404` on `HEAD /claude` is harmless (finding 1).
+   - Take `harness_version` only from the harness's own user-agent
+     (`claude-cli/…`; `codex_exec/…` for `codex exec`), never a runtime's
+     (`Bun/…`). For a
+     call without one, leave it null (finding 1).
+   - Store tool count and tools size per harness version, so a version that
+     changes them shows as expected drift, not a bug (finding 3).
    - Fix the Codex gaps found in `codex-rs/codex-api/src/rate_limits.rs`: the
      quota regex misses per-limit headers (`x-codex-<limit>-primary-*`),
      `x-codex-rate-limit-reached-type`, and `x-codex-promo-message`; usage
@@ -315,14 +383,22 @@ it.
    source. Keep parsing fail-soft: every field optional. A missing usage field
    stays **unknown (null)**, not 0: `fromAnthropicUsage` / `fromOpenAIUsage`
    currently default missing fields to 0, which silently asserts "no tokens".
+   Also store cache writes split by lifetime (5-minute and 1-hour columns,
+   from `usage.cache_creation`), keeping the total; null when the split is
+   missing. Phase 2 prices each lifetime separately (finding 6).
 4. **Risk-ranked scenario recordings (layer 2).** In a throwaway sandbox repo
    with dummy content, record per harness: long tool loop, subagent,
    compaction, interrupt-then-resume, a hook that injects context, web search,
    visible thinking. Store each as an ordered list of request/response pairs
    with written expected results (turn IDs, kinds, completion, usage). Extend
    `make-fixture` to redact request bodies (home paths, `account_uuid`,
-   `device_id`, `installation_id`). Decide the subagent rule here (same turn,
-   child turn, or separate), which feeds feature F.
+   `device_id`, `installation_id`; `account_uuid` sits inside
+   `metadata.user_id`, a JSON string; Claude Code's git status block in the
+   first user message, which holds the git user name, branch names, and
+   recent commit messages). Decide the subagent rule here (same
+   turn, child turn, or separate), which feeds feature F. Also record whether
+   current Claude Code still sends a session-title request in an interactive
+   session (finding 2).
 5. **Flagged calls become fixtures (layer 4).** Let `make-fixture` read a call
    from the ledger by ID (bodies are kept 14 days), so a call flagged in step 1
    can become a reviewed regression test.
@@ -331,11 +407,92 @@ it.
    `_recover_interrupted_stream_output_tokens`. The 4-character rule is rough,
    and code and non-English text tokenize differently from prose.
 
+#### Phase 1 follow-ups: findings from live runs (2026-11-14)
+
+From re-running the Phase 1 "one prompt, one row" check on the laptop
+(`claude -p "Reply with just the word: pong"`), before and after upgrading
+Claude Code from 2.1.133 to 2.1.311 (Homebrew). Each finding names the version
+it was seen on.
+
+1. **Connectivity check.** The path depends on the version: 2.1.133 sends
+   `HEAD /claude` (empty upstream path), which Anthropic answers with `404`;
+   2.1.311 sends `HEAD /api/hello` → `200`. On both versions the request
+   carries the Bun runtime's user-agent (`Bun/1.3.14`, `Bun/1.4.4`) and no
+   session ID. So the ledger stored `upstream_error` for a harmless 404, a
+   runtime version as `harness_version`, and a row that cannot be linked to
+   its session. The fixes are in step 1 above.
+2. **Session-title request.** 2.1.133 sends a Haiku call in parallel with the
+   first turn (17 ms apart) asking for a 3–7 word session title. It has the
+   turn's session ID and no turn ID. Its body has `tools: []`, so it is
+   classified `background` only because the list is **empty**. A side
+   request that ever sends a tool would be counted as a turn. Not seen in two
+   `-p` runs on 2.1.311.
+3. **Tool count depends on the version.** With the same MCP servers and
+   plugins, 2.1.133 sent 133 tools (312,260 characters; prompt ≈ 98k tokens)
+   and 2.1.311 sent 11 (22,620 characters; prompt ≈ 19k tokens). 2.1.311
+   defers MCP tools behind a tool-search tool. Tools can be most of the
+   prompt, so feature A shows them as their own slice.
+4. **Cache break, a worked example for B.** Two 2.1.311 runs 3 minutes apart
+   both wrote the whole prompt to cache (≈ 19.4k cache-write tokens, 0
+   read). Comparing the stored request bodies:
+   - `tools[1]` (Bash) description changed: background timeout "default
+     1800000 ms" → "default 600000 ms". The second run was started from a new
+     terminal tab; the cause (environment, settings, or a server-side flag)
+     is not known.
+   - The skills list in the first user message came in a different order.
+   - `metadata.user_id` differed (session ID). Metadata is not part of the
+     cached prompt.
+
+   The cache key is a prefix in the order **tools → system → messages**, so a
+   one-number change in the second tool invalidates everything after it. The
+   detector (B) therefore: finds the first point where two consecutive
+   requests of the same setup differ, names its section and item (`tools[1]`,
+   Bash), counts the cost (cache-write tokens where a read was expected),
+   and flags text that changes for no reason (an unsorted list) apart from a
+   real config change. It needs request bodies, which the ledger keeps for 14
+   days.
+
+   A second break shows that **where** the change lands decides the cost.
+   A later 2.1.311 run read only 10,474 tokens and wrote 8,916. The only
+   change was the git status snapshot that Claude Code puts in the first
+   user message (`(clean)` → `M docs/PLAN.md`, a file edited between runs).
+   Cache hits are checked only at `cache_control` breakpoints; this request
+   had three: `system[1]`, `system[2]` (end of tools + system ≈ 10.5k tokens),
+   and `messages[1]`. The change came after the second, so tools and system
+   were read and everything from the first message on was written again. The
+   Bash timeout change came before the first breakpoint, so nothing was read.
+   The detector reports the break point relative to the breakpoints ("broke
+   at `messages[0]`, after `system[2]`; 8.9k tokens written again"). Any git
+   change between sessions (edit, commit, branch switch) causes this break on
+   a session's first call; within a session the snapshot is fixed. Treat it
+   as an **expected** break, not a problem.
+5. **Several installs per machine.** The laptop has Claude Code 2.1.311
+   (Homebrew, on `PATH`) and 2.1.325 (bundled with the Claude desktop app),
+   and Codex 0.169.0 (Homebrew, on `PATH`; 0.162.0 before upgrading),
+   0.166.0-alpha.6 (bundled with ChatGPT.app), and 0.168.0 / 0.169.0 (the
+   Codex app-server daemon). Only the `PATH` install goes through the gateway
+   in the tutorial commands. Check `which -a claude codex` and `--version` on
+   each machine before comparing ledgers.
+6. **The cache outlives sessions, and has two lifetimes.** The prompt cache
+   is keyed on the exact prompt prefix within the account, not on the
+   session: separate `claude -p` runs (new session IDs) read each other's
+   cache. Session IDs sit in `metadata`, which is not part of the cached
+   prompt. Claude Code 2.1.311 marks every breakpoint
+   `{"type": "ephemeral", "ttl": "1h"}`, so a prefix lives 1 hour after its
+   last hit (the API default is 5 minutes). The response splits cache writes
+   by lifetime (`usage.cache_creation.ephemeral_5m_input_tokens` /
+   `ephemeral_1h_input_tokens`), and a 1-hour write is billed at a higher
+   rate than a 5-minute one. The ledger stores only the total
+   (`cache_write_tokens`), so Phase 2 cost would underprice every Claude Code
+   cache write. Fix in step 3 above.
+
 ### Phase 2 — Observability
 
 - Pinned price file and estimated USD cost per call (moved from Phase 1).
+  Price 5-minute and 1-hour cache writes separately (live finding 6).
 - OTel export to Langfuse (Docker Compose).
 - Custom dashboard: A, B, C, E.
+- Extend the gateway read API (started with the CLI) for the dashboard.
 - Quota tracking (C) uses only responses that carry quota headers. Responses
   without them (for example an upstream `429` with no
   `anthropic-ratelimit-unified-*` headers) are skipped, not read as zero.
