@@ -52,6 +52,9 @@ Reasoning tokens are already included in output tokens. Do not add them again.
 No aggregate, composition estimate, pricing, or quota forecast is added here.
 
 Invalid listed filter/pagination values return 400 with `{ "error": "..." }`.
+Unexpected read failures return 500 with
+`{ "error": "unable to read recorded calls" }`. The API logs a generic failure
+message without exception text, SQL, or local database paths.
 HEAD is supported with the corresponding GET status/headers and no body.
 Unknown API paths and unsupported methods return 404 and never reach the
 provider proxy. Responses use `Cache-Control: no-store`. They do not include

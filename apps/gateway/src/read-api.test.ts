@@ -134,6 +134,21 @@ describe("read API", () => {
     expect(JSON.stringify(row)).not.toContain("private-value");
   });
 
+  it.each(["/api/calls", "/api/calls/existing"])("returns a safe JSON error when reading %s fails", async (path) => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(ledger.db, "select").mockImplementation(() => {
+      throw new Error("sensitive SQL and database path");
+    });
+
+    const res = await app.request(path);
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({ error: "unable to read recorded calls" });
+    expect(log).toHaveBeenCalledWith("[api] request failed");
+    expect(JSON.stringify(log.mock.calls)).not.toContain("sensitive");
+  });
+
   it("returns 404 for missing calls, unknown API routes, and write methods without proxying", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("must not proxy API requests"));
     ledger.db.insert(calls).values(call("existing")).run();

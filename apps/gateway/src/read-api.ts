@@ -38,6 +38,13 @@ export type CallList = { calls: CallMetadata[]; nextOffset: number | null };
 export function createReadApi(ledger: Ledger) {
   const api = new Hono();
 
+  api.onError((_err, c) => {
+    // Database exceptions can contain SQL or local paths. Keep the diagnostic
+    // generic so neither the response nor logs expose those details.
+    console.error("[api] request failed");
+    return c.json({ error: "unable to read recorded calls" }, 500);
+  });
+
   // Usage changes after each completed call; browsers must not reuse old pages.
   api.use("*", async (c, next) => {
     c.header("Cache-Control", "no-store");
