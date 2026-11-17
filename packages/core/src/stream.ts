@@ -4,7 +4,7 @@
 // model output arrived. It also keeps a few facts about the stream that the
 // gateway's invariant checks use (apps/gateway/src/flags.ts).
 
-import { ANTHROPIC_EVENTS, ANTHROPIC_USAGE_FIELDS, OPENAI_RESPONSES_EVENTS, OPENAI_USAGE_FIELDS } from "./known.ts";
+import { ANTHROPIC_BLOCKS, ANTHROPIC_DELTAS, ANTHROPIC_EVENTS, ANTHROPIC_USAGE_FIELDS, OPENAI_RESPONSES_EVENTS, OPENAI_USAGE_FIELDS } from "./known.ts";
 import type { AnthropicEvent, AnthropicUsage, OpenAIEvent } from "./provider-types.ts";
 import type { SseEvent } from "./sse.ts";
 import { estimateTokens, fromAnthropicUsage, fromOpenAIUsage, type Usage } from "./usage.ts";
@@ -30,7 +30,11 @@ export type StreamSummary = {
   timeToFirstTokenMs: number | null;
   /** Characters of model output received. Used to estimate output tokens. */
   outputChars: number;
-  /** Event types not in known.ts, with how often each arrived. Drift signal. */
+  /**
+   * Event types not in known.ts, with how often each arrived. Drift signal.
+   * Unknown Anthropic block and delta types are counted here too, as
+   * "content_block_start:<type>" and "content_block_delta:<type>".
+   */
   unknownEvents: Record<string, number>;
   /** Top-level usage fields not in known.ts. Drift signal. */
   unknownUsageFields: string[];
@@ -83,8 +87,11 @@ function base(knownEvents: Set<string>, knownUsageFields: Set<string>) {
     serverToolSeen: false,
   };
   // Drift: remember what we do not know, but keep parsing (fail-soft).
+  const noteUnknown = (key: string) => {
+    s.unknownEvents[key] = (s.unknownEvents[key] ?? 0) + 1;
+  };
   const noteEvent = (type: string) => {
-    if (!knownEvents.has(type)) s.unknownEvents[type] = (s.unknownEvents[type] ?? 0) + 1;
+    if (!knownEvents.has(type)) noteUnknown(type);
   };
   const noteUsage = (usage: object) => {
     for (const field of Object.keys(usage)) {
@@ -113,13 +120,13 @@ function base(knownEvents: Set<string>, knownUsageFields: Set<string>) {
       usage: { ...s.usage, outputTokens: Math.max(s.usage.outputTokens ?? 0, estimateTokens(s.outputChars)), estimated: true },
     };
   };
-  return { s, onOutput, onWholeOutput, noteEvent, noteUsage, summary };
+  return { s, onOutput, onWholeOutput, noteEvent, noteUnknown, noteUsage, summary };
 }
 
 // Anthropic Messages: message_start → (content_block_start, content_block_delta*,
 // content_block_stop)* → message_delta → message_stop
 function anthropic(): StreamInterpreter {
-  const { s, onOutput, onWholeOutput, noteEvent, noteUsage, summary } = base(ANTHROPIC_EVENTS, ANTHROPIC_USAGE_FIELDS);
+  const { s, onOutput, onWholeOutput, noteEvent, noteUnknown, noteUsage, summary } = base(ANTHROPIC_EVENTS, ANTHROPIC_USAGE_FIELDS);
   // message_delta carries cumulative totals but may omit input fields, so
   // merge the raw objects and normalize the result.
   let raw: AnthropicUsage = {};
@@ -140,6 +147,9 @@ function anthropic(): StreamInterpreter {
         // Some blocks arrive whole, with no deltas (streaming docs, "Event types").
         case "content_block_start": {
           const block = d.content_block;
+          // The SDK types list every block type known today; a new one is drift.
+          const blockType: string | null | undefined = block?.type;
+          if (blockType && !ANTHROPIC_BLOCKS.has(blockType)) noteUnknown(`content_block_start:${blockType}`);
           if (block?.type === "redacted_thinking") {
             // Encrypted thinking: model output, but its data is not text the
             // model wrote, so it sets the first token but adds no characters.
@@ -160,9 +170,13 @@ function anthropic(): StreamInterpreter {
           // Only these delta types carry text the model wrote. signature_delta
           // (and any delta type we do not know) is not output.
           const delta = d.delta;
+          const deltaType: string | null | undefined = delta?.type;
+          if (deltaType && !ANTHROPIC_DELTAS.has(deltaType)) noteUnknown(`content_block_delta:${deltaType}`);
           if (delta?.type === "text_delta") onOutput(delta.text, atMs);
           else if (delta?.type === "thinking_delta") onOutput(delta.thinking, atMs);
           else if (delta?.type === "input_json_delta") onOutput(delta.partial_json, atMs);
+          // Server-side compaction: the summary the model wrote.
+          else if (delta?.type === "compaction_delta") onOutput(delta.content, atMs);
           break;
         }
         case "message_delta":

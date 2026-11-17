@@ -337,6 +337,37 @@ describe("unknown events and usage fields", () => {
     expect(s.unknownUsageFields).toEqual(["new_counter"]);
   });
 
+  // A new block or delta type can carry output the interpreter does not count,
+  // so it is reported like an unknown event. Known types: the content_block
+  // and delta unions in @anthropic-ai/sdk 1.4.0 (BetaRawContentBlockStartEvent,
+  // BetaRawContentBlockDelta).
+  it("counts Anthropic block and delta types it does not know", () => {
+    const s = runEvents("anthropic", [
+      messageStart("claude-opus-5-5", { input_tokens: 10, output_tokens: 1 }),
+      blockStart(0, { type: "hologram", data: "..." }),
+      { type: "content_block_delta", index: 0, delta: { type: "hologram_delta", frames: "..." } },
+      { type: "content_block_delta", index: 0, delta: { type: "hologram_delta", frames: "..." } },
+      blockStop(0),
+      // Known and ignored on purpose: seen live in web search answers.
+      blockStart(1, { type: "text", text: "" }),
+      { type: "content_block_delta", index: 1, delta: { type: "citations_delta", citation: { type: "web_search_result_location" } } },
+    ]);
+    expect(s.unknownEvents).toEqual({ "content_block_start:hologram": 1, "content_block_delta:hologram_delta": 2 });
+    // An unknown delta is not counted as output.
+    expect(s.timeToFirstTokenMs).toBeNull();
+  });
+
+  // Server-side compaction: the summary is text the model wrote (BetaCompactionContentBlockDelta).
+  it("counts a compaction delta's summary as output", () => {
+    const s = runEvents("anthropic", [
+      messageStart("claude-opus-5-5", { input_tokens: 10, output_tokens: 1 }),
+      blockStart(0, { type: "compaction", content: null }),
+      { type: "content_block_delta", index: 0, delta: { type: "compaction_delta", content: "Summary so far." } },
+    ]);
+    expect(s.outputChars).toBe("Summary so far.".length);
+    expect(s.unknownEvents).toEqual({});
+  });
+
   it("counts OpenAI Responses event types and lists usage fields it does not know", () => {
     const extra = 'event: response.brand_new\ndata: {"type":"response.brand_new"}\n\n';
     const text = before(CODEX_169, "response.completed") + extra + CODEX_169.slice(CODEX_169.indexOf("event: response.completed\n")).replace('"usage":{', '"usage":{"new_counter":1,');

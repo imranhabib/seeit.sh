@@ -19,6 +19,7 @@ non-obvious reason (a protocol detail, a performance rule).
 
 ```
 apps/gateway     Hono proxy server (TypeScript, Node 24)
+apps/iris        records harness sessions through the real gateway (PLAN.md, follow-up step 4)
 apps/ledger      ledger service with PostgreSQL storage (ADR 0007)
 packages/core    shared parsers and helpers, imported as @seeit/core
 docs/            plan and ADRs
@@ -35,6 +36,7 @@ pnpm test             # run all tests (Vitest)
 pnpm typecheck        # tsc --noEmit for all packages
 pnpm dev              # run the gateway on 127.0.0.1:8787
 pnpm summarize        # summarize recordings in data/recordings
+pnpm iris run         # record the Iris scenarios (uses real harness logins; see apps/iris/src/config.ts)
 pnpm --filter @seeit/gateway db:generate   # new SQL migration after a schema change
 pnpm --filter @seeit/ledger db:generate    # same, for the PostgreSQL ledger
 pnpm --filter @seeit/ledger test:db        # PostgreSQL tests; needs SEEIT_TEST_DATABASE_URL
@@ -96,3 +98,19 @@ critical:
   flagged", never "wrong and silent".
 - Any change to the proxy path must keep the streaming test passing (first
   chunk reaches the client before upstream finishes).
+
+### Iris scenarios (live harness runs)
+
+`pnpm iris run` drives the real Claude Code and Codex through the gateway
+and uses the owner's subscription quota. To save tokens:
+
+- Run only the scenarios relevant to the change under test, with
+  `pnpm iris run --only <scenario-id>` (repeatable) or `--harness claude|codex`.
+  Scenario IDs are in `apps/iris/src/scenarios.ts`. For example, a change to
+  turn detection for subagents needs `claude-subagent` and `codex-subagent`,
+  not the whole list.
+- Run the full suite only when the owner asks for it, or when a new harness
+  version needs checking.
+- Scenarios use lightweight models (`MODELS` in
+  `apps/iris/src/drivers/headless.ts`). Do not switch them to larger models.
+- Unit tests (`pnpm test`) need no accounts; run them for every change.

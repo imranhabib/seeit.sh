@@ -193,6 +193,7 @@ function callRow(b: {
     harnessVersion: b.info.harnessVersion,
     sessionId: b.info.sessionId,
     turnId: b.turnId,
+    agentId: b.info.agentId,
     kind: b.info.kind,
     method: b.method,
     path: b.path,

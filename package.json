@@ -9,7 +9,8 @@
     "dev": "pnpm --filter @seeit/gateway dev",
     "summarize": "pnpm --filter @seeit/gateway summarize",
     "test": "vitest run",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "iris": "pnpm --filter @seeit/iris cli"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
