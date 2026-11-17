@@ -600,7 +600,8 @@ has a unit test built from the recorded shape, and an Iris scenario.
    (`spawn_agent`) keeps the session ID but sends a new `turn_id` and
    `thread_id`; its turn metadata names the user's turn in `root_turn_id` and
    the parent in `parent_thread_id`. The ledger stores the agent ID in
-   `agent_id` (migration 0005), which feature F can build the tree from.
+   `agent_id` (gateway migration 0005; ledger service migration 0001), which
+   feature F can build the tree from.
 3. **Harness-written user messages are not prompts.** A background subagent
    reports back through a user message that holds only `<system-reminder>`
    blocks ("[SYSTEM NOTIFICATION - NOT USER INPUT]"). Such a message does not

@@ -60,7 +60,7 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
   it("round-trips every metadata field without narrowing counters or timings", async () => {
     const row: typeof calls.$inferSelect = {
       ...call("metadata"),
-      harnessVersion: "claude-cli/test", sessionId: "session-1", turnId: "turn-1",
+      harnessVersion: "claude-cli/test", sessionId: "session-1", turnId: "turn-1", agentId: "agent-1",
       httpStatus: 200, errorType: null, model: "test-model",
       inputTokens: 5_000_000_000, cacheReadTokens: 100, cacheWriteTokens: 30,
       cacheWrite5mTokens: 10, cacheWrite1hTokens: 20, outputTokens: 50,

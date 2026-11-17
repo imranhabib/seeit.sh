@@ -31,7 +31,11 @@ export const calls = pgTable(
     harness: text("harness").notNull(), // "claude" | "codex"
     harnessVersion: text("harness_version"),
     sessionId: text("session_id"),
-    turnId: text("turn_id"), // null unless kind is "turn"
+    // Turn calls get their turn. Background calls with a session ID are linked
+    // to the session's turn in progress (inferred; see apps/gateway/src/turns.ts).
+    turnId: text("turn_id"),
+    /** Subagent ID (Claude Code: x-claude-code-agent-id; Codex: the spawned agent's thread_id); null for the main agent. Subagent calls share the user's turn. */
+    agentId: text("agent_id"),
     kind: text("kind").notNull(), // "turn" | "background" | "connectivity" (CallKind in packages/core/src/request.ts)
     method: text("method").notNull(),
     path: text("path").notNull(),
