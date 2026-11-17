@@ -510,9 +510,11 @@ it.
    source (docs page, SDK type, or Codex source file at a pinned commit).
 3. **Typed field access.** Add `@anthropic-ai/sdk` as a dev dependency and type
    the fields the interpreter reads with its beta types
-   (`BetaRawMessageStreamEvent`, `BetaMessageDeltaUsage`). For Codex, write
-   small local types for the fields read, with links to the matching Codex
-   source. Keep parsing fail-soft: every field optional. A missing usage field
+   (`BetaRawMessageStreamEvent`, `BetaMessageDeltaUsage`). For Codex, use the
+   `openai` SDK's types (dev dependency) for the standard fields, plus a small
+   local type for the fields only Codex's backend sends
+   (`codex_rollout_budget_units`, `attribution`), with links to the matching
+   Codex source. Keep parsing fail-soft: every field optional. A missing usage field
    stays **unknown (null)**, not 0: `fromAnthropicUsage` / `fromOpenAIUsage`
    currently default missing fields to 0, which silently asserts "no tokens".
    Also store cache writes split by lifetime (5-minute and 1-hour columns,

@@ -5,6 +5,7 @@
 // gateway's invariant checks use (apps/gateway/src/flags.ts).
 
 import { ANTHROPIC_EVENTS, ANTHROPIC_USAGE_FIELDS, OPENAI_RESPONSES_EVENTS, OPENAI_USAGE_FIELDS } from "./known.ts";
+import type { AnthropicEvent, AnthropicUsage, OpenAIEvent } from "./provider-types.ts";
 import type { SseEvent } from "./sse.ts";
 import { estimateTokens, fromAnthropicUsage, fromOpenAIUsage, type Usage } from "./usage.ts";
 
@@ -52,18 +53,17 @@ export function createInterpreter(provider: Provider): StreamInterpreter {
   return provider === "anthropic" ? anthropic() : openaiResponses();
 }
 
-type Json = Record<string, any>;
-
-function parse(data: string): Json | null {
+/**
+ * Parse an event's JSON data. The result is only an object, not checked
+ * against T: the Loose types make the code treat every field as optional.
+ */
+function parse<T>(data: string): T | null {
   try {
-    return JSON.parse(data);
+    const v: unknown = JSON.parse(data);
+    return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as T) : null;
   } catch {
     return null;
   }
-}
-
-function isObject(v: unknown): v is Json {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 function base(knownEvents: Set<string>, knownUsageFields: Set<string>) {
@@ -86,7 +86,7 @@ function base(knownEvents: Set<string>, knownUsageFields: Set<string>) {
   const noteEvent = (type: string) => {
     if (!knownEvents.has(type)) s.unknownEvents[type] = (s.unknownEvents[type] ?? 0) + 1;
   };
-  const noteUsage = (usage: Json) => {
+  const noteUsage = (usage: object) => {
     for (const field of Object.keys(usage)) {
       if (!knownUsageFields.has(field) && !s.unknownUsageFields.includes(field)) s.unknownUsageFields.push(field);
     }
@@ -122,10 +122,10 @@ function anthropic(): StreamInterpreter {
   const { s, onOutput, onWholeOutput, noteEvent, noteUsage, summary } = base(ANTHROPIC_EVENTS, ANTHROPIC_USAGE_FIELDS);
   // message_delta carries cumulative totals but may omit input fields, so
   // merge the raw objects and normalize the result.
-  let raw: Json = {};
+  let raw: AnthropicUsage = {};
   return {
     onEvent(e, atMs) {
-      const d = parse(e.data);
+      const d = parse<AnthropicEvent>(e.data);
       if (!d) return;
       noteEvent(d.type ?? e.event ?? "(no type)");
       switch (d.type) {
@@ -139,14 +139,15 @@ function anthropic(): StreamInterpreter {
           break;
         // Some blocks arrive whole, with no deltas (streaming docs, "Event types").
         case "content_block_start": {
-          const block = d.content_block ?? {};
-          if (block.type === "redacted_thinking") {
+          const block = d.content_block;
+          if (block?.type === "redacted_thinking") {
             // Encrypted thinking: model output, but its data is not text the
             // model wrote, so it sets the first token but adds no characters.
             onWholeOutput(atMs);
-          } else if (block.type === "server_tool_use") {
+          } else if (block?.type === "server_tool_use" || block?.type === "mcp_tool_use") {
+            // Server-run tools (and MCP connector tools): their results become input.
             s.serverToolSeen = true;
-          } else if (block.type === "fallback") {
+          } else if (block?.type === "fallback") {
             // Server-side fallback: from here on, to.model writes the answer.
             s.fallback = true;
             s.model = block.to?.model ?? s.model;
@@ -156,21 +157,26 @@ function anthropic(): StreamInterpreter {
           break;
         }
         case "content_block_delta": {
-          const delta = d.delta ?? {};
-          // signature_delta has none of these fields, so it is ignored.
-          onOutput(delta.text ?? delta.thinking ?? delta.partial_json, atMs);
+          // Only these delta types carry text the model wrote. signature_delta
+          // (and any delta type we do not know) is not output.
+          const delta = d.delta;
+          if (delta?.type === "text_delta") onOutput(delta.text, atMs);
+          else if (delta?.type === "thinking_delta") onOutput(delta.thinking, atMs);
+          else if (delta?.type === "input_json_delta") onOutput(delta.partial_json, atMs);
           break;
         }
         case "message_delta":
           if (d.usage) {
             noteUsage(d.usage);
             s.usage = fromAnthropicUsage((raw = { ...raw, ...d.usage }));
-            if (isObject(raw.server_tool_use)) s.serverToolUse = raw.server_tool_use;
+            // Counts per server tool, for example {"web_search_requests": 1}.
+            if (raw.server_tool_use) s.serverToolUse = raw.server_tool_use as Record<string, number>;
             // After a fallback, the serving model is the fallback_message entry
             // (refusals-and-fallback docs, "Streaming").
-            const iterations: Json[] = Array.isArray(d.usage.iterations) ? d.usage.iterations : [];
-            const served = iterations.findLast((it) => it?.type === "fallback_message")?.model;
-            if (typeof served === "string") s.model = served;
+            const iterations = Array.isArray(d.usage.iterations) ? d.usage.iterations : [];
+            for (const it of iterations) {
+              if (it?.type === "fallback_message" && it.model) s.model = it.model; // the last one wins
+            }
           }
           break;
         case "message_stop":
@@ -207,7 +213,7 @@ function openaiResponses(): StreamInterpreter {
   const { s, onOutput, noteEvent, noteUsage, summary } = base(OPENAI_RESPONSES_EVENTS, OPENAI_USAGE_FIELDS);
   return {
     onEvent(e, atMs) {
-      const d = parse(e.data);
+      const d = parse<OpenAIEvent>(e.data);
       if (!d) return;
       const type: string = d.type ?? e.event ?? "";
       noteEvent(type || "(no type)");

@@ -16,7 +16,7 @@ const EVENT_GAP_MS = 100;
 
 // Anthropic-shaped stream, one event every EVENT_GAP_MS.
 const CLAUDE_EVENTS = [
-  { type: "message_start", message: { model: "claude-test", usage: { input_tokens: 10, cache_read_input_tokens: 900, cache_creation_input_tokens: 50, output_tokens: 1 } } },
+  { type: "message_start", message: { model: "claude-test", usage: { input_tokens: 10, cache_read_input_tokens: 900, cache_creation_input_tokens: 50, cache_creation: { ephemeral_5m_input_tokens: 20, ephemeral_1h_input_tokens: 30 }, output_tokens: 1 } } },
   { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } },
   { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " world" } },
   { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } },
@@ -181,6 +181,8 @@ describe("ledger", () => {
       inputTokens: 10,
       cacheReadTokens: 900,
       cacheWriteTokens: 50,
+      cacheWrite5mTokens: 20,
+      cacheWrite1hTokens: 30,
       outputTokens: 3,
       tokensEstimated: false,
       toolsCount: 1,

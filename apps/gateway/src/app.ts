@@ -213,6 +213,8 @@ function estimateUnreported(info: RequestInfo, requestText: string | null, outpu
     // The estimate counts the whole request; how much of it was cached is unknown.
     cacheReadTokens: null,
     cacheWriteTokens: null,
+    cacheWrite5mTokens: null,
+    cacheWrite1hTokens: null,
     outputTokens: estimateTokens(outputChars),
     reasoningTokens: null,
     codexRolloutBudgetUnits: null,
@@ -225,6 +227,8 @@ function usageColumns(u: Usage | null) {
     inputTokens: u?.inputTokens ?? null,
     cacheReadTokens: u?.cacheReadTokens ?? null,
     cacheWriteTokens: u?.cacheWriteTokens ?? null,
+    cacheWrite5mTokens: u?.cacheWrite5mTokens ?? null,
+    cacheWrite1hTokens: u?.cacheWrite1hTokens ?? null,
     outputTokens: u?.outputTokens ?? null,
     reasoningTokens: u?.reasoningTokens ?? null,
     codexRolloutBudgetUnits: u?.codexRolloutBudgetUnits ?? null,

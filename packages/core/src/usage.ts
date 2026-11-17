@@ -9,10 +9,19 @@
 // A field the provider did not send is null (unknown), never 0. A 0 would
 // claim "no tokens" when we simply do not know.
 
+import type { AnthropicUsage, OpenAIUsage } from "./provider-types.ts";
+
 export type Usage = {
   inputTokens: number | null;
   cacheReadTokens: number | null;
   cacheWriteTokens: number | null;
+  /**
+   * The cache write split by lifetime: billed at different rates (PLAN.md,
+   * live-run finding 6). Anthropic only; null when the split is missing.
+   * Together they equal cacheWriteTokens.
+   */
+  cacheWrite5mTokens: number | null;
+  cacheWrite1hTokens: number | null;
   outputTokens: number | null;
   /** Thinking / reasoning tokens. Already included in outputTokens. */
   reasoningTokens: number | null;
@@ -33,19 +42,19 @@ export function estimateTokens(chars: number): number {
   return Math.ceil(chars / CHARS_PER_TOKEN);
 }
 
-type Json = Record<string, any>;
-
 /** The value if it is a number, otherwise null (missing, null, or a wrong type). */
 function num(v: unknown): number | null {
   return typeof v === "number" ? v : null;
 }
 
 /** Anthropic `usage` object (message_start, message_delta, or a non-streaming body). */
-export function fromAnthropicUsage(u: Json): Usage {
+export function fromAnthropicUsage(u: AnthropicUsage): Usage {
   return {
     inputTokens: num(u.input_tokens),
     cacheReadTokens: num(u.cache_read_input_tokens),
     cacheWriteTokens: num(u.cache_creation_input_tokens),
+    cacheWrite5mTokens: num(u.cache_creation?.ephemeral_5m_input_tokens),
+    cacheWrite1hTokens: num(u.cache_creation?.ephemeral_1h_input_tokens),
     outputTokens: num(u.output_tokens),
     reasoningTokens: num(u.output_tokens_details?.thinking_tokens),
     codexRolloutBudgetUnits: null,
@@ -54,7 +63,7 @@ export function fromAnthropicUsage(u: Json): Usage {
 }
 
 /** OpenAI Responses `usage` object (from response.completed). */
-export function fromOpenAIUsage(u: Json): Usage {
+export function fromOpenAIUsage(u: OpenAIUsage): Usage {
   const input = num(u.input_tokens);
   const cacheRead = num(u.input_tokens_details?.cached_tokens);
   const cacheWrite = num(u.input_tokens_details?.cache_write_tokens);
@@ -64,6 +73,8 @@ export function fromOpenAIUsage(u: Json): Usage {
     inputTokens: input === null ? null : Math.max(0, input - (cacheRead ?? 0) - (cacheWrite ?? 0)),
     cacheReadTokens: cacheRead,
     cacheWriteTokens: cacheWrite,
+    cacheWrite5mTokens: null,
+    cacheWrite1hTokens: null,
     outputTokens: num(u.output_tokens),
     reasoningTokens: num(u.output_tokens_details?.reasoning_tokens),
     // Source: codex-rs/codex-api/src/sse/responses.rs, ResponseCompletedUsage.

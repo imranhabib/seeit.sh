@@ -36,6 +36,8 @@ describe("anthropic interpreter", () => {
       inputTokens: 4,
       cacheReadTokens: 46377,
       cacheWriteTokens: 154,
+      cacheWrite5mTokens: 0, // from message_start's cache_creation, kept when message_delta omits it
+      cacheWrite1hTokens: 154,
       outputTokens: 37,
       reasoningTokens: 0,
       codexRolloutBudgetUnits: null,
@@ -204,6 +206,15 @@ describe("spec: server tools change input mid-stream (gaps 2 and 3)", () => {
     expect(s.serverToolSeen).toBe(true);
   });
 
+  // MCP connector tools also run on the server (BetaMCPToolUseBlock in @anthropic-ai/sdk 1.4.0).
+  it("treats an MCP connector tool block as a server tool", () => {
+    const s = runEvents("anthropic", [
+      messageStart("claude-opus-5-5", { input_tokens: 10, output_tokens: 1 }),
+      blockStart(0, { type: "mcp_tool_use", id: "mcptoolu_1", name: "search", server_name: "docs", input: {} }),
+    ]);
+    expect(s.serverToolSeen).toBe(true);
+  });
+
   it("does not count search results as model output (they become input)", () => {
     const s = runEvents("anthropic", webSearch);
     const modelText = "I'll check" + '{"query": "weather NYC today"}' + "Here's the current weather";
@@ -319,7 +330,8 @@ describe("unknown events and usage fields", () => {
     const extra =
       'event: brand_new\ndata: {"type":"brand_new"}\n\n' +
       'event: brand_new\ndata: {"type":"brand_new"}\n\n' +
-      'event: message_delta\ndata: {"type":"message_delta","delta":{},"usage":{"output_tokens":40,"new_counter":3}}\n\n';
+      // fallback_credit is documented (BetaUsage in @anthropic-ai/sdk 1.4.0) and ignored on purpose.
+      'event: message_delta\ndata: {"type":"message_delta","delta":{},"usage":{"output_tokens":40,"new_counter":3,"fallback_credit":null}}\n\n';
     const s = run("anthropic", before(CLAUDE, "message_stop") + extra);
     expect(s.unknownEvents).toEqual({ brand_new: 2 });
     expect(s.unknownUsageFields).toEqual(["new_counter"]);
