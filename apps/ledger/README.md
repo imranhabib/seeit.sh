@@ -1,9 +1,10 @@
-# Ledger: PostgreSQL foundation
+# Ledger service
 
 This package starts a separate ledger process, opens PostgreSQL asynchronously,
 and applies its own generated migrations. It exposes `GET /health` for database
-readiness. Recording ingestion and read APIs are the next PRs; the gateway
-still records to SQLite and does not call this service yet.
+readiness and `POST /ingest/calls` for recordings (see below). The read API is
+a later PR. The gateway still records to SQLite and does not call this
+service yet (ADR 0007, Phase 1C).
 
 ## Native local setup
 
@@ -31,6 +32,7 @@ From the repository root:
 ```bash
 pnpm install
 export SEEIT_LEDGER_DATABASE_URL=postgresql://127.0.0.1:5432/seeit_ledger
+export SEEIT_LEDGER_WRITE_TOKEN="$(openssl rand -hex 32)"   # the gateway needs the same value
 pnpm --filter @seeit/ledger start
 ```
 
@@ -51,6 +53,7 @@ setup separately.
 | Setting | Purpose | Default |
 | --- | --- | --- |
 | `SEEIT_LEDGER_DATABASE_URL` | PostgreSQL connection URL. Keep credentials out of committed files. | Required |
+| `SEEIT_LEDGER_WRITE_TOKEN` | Bearer token the gateway sends to `POST /ingest/calls`. Keep it out of committed files. | Required |
 | `SEEIT_LEDGER_HOST` | HTTP listen address. | `127.0.0.1` |
 | `SEEIT_LEDGER_PORT` | HTTP listen port. | `8788` |
 | `SEEIT_TEST_DATABASE_URL` | Separate connection used to create disposable integration-test databases. | Unset; PostgreSQL tests skip in the ordinary suite |
@@ -58,6 +61,27 @@ setup separately.
 Use `pnpm --filter @seeit/ledger dev` for watch mode. `start` does not watch
 files. Ctrl+C/SIGTERM stops HTTP acceptance and drains database connections.
 Stopping the ledger does not stop the existing gateway process.
+
+## Recording ingestion
+
+`POST /ingest/calls` with `Authorization: Bearer <SEEIT_LEDGER_WRITE_TOKEN>`
+and one `RecordedCall` as JSON (`packages/core/src/call.ts`): the redacted
+request and response, the decoded bodies, when each response piece arrived,
+and the facts only the gateway knows (timings, client aborted, read failed,
+turn ID). The ledger analyzes it with `analyzeCall` from `@seeit/core`, adds
+the untested-version flag, and stores the call and its gzipped bodies in one
+transaction.
+
+| Status | Meaning |
+| --- | --- |
+| 201 `{"status":"stored"}` | Stored; the transaction committed. |
+| 200 `{"status":"duplicate"}` | A call with this ID is already stored (a retry); nothing changed. |
+| 400 `{"error":"..."}` | Not JSON, or not a valid recorded call; the message names the problem. |
+| 401 | Missing or wrong token. |
+| 413 | Larger than 64 MB. |
+| 503 | Storage failed; the sender may retry with the same ID. |
+
+Responses and logs never include request content, SQL, or connection details.
 
 ## Schema and migrations
 

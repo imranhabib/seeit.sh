@@ -4,7 +4,10 @@
 export { createSseParser, type SseEvent } from "./sse.ts";
 export { decideCompletion, type Completion } from "./completion.ts";
 export { FIXTURE_FOR_VERSION, hasFixture } from "./tested-versions.ts";
-export { createInterpreter, readRequest } from "./provider/index.ts";
+export { analyzeCall, type AnalyzedCall, type CallFields, type RecordedCall } from "./call.ts";
+export { callFlags, type Flag } from "./flags.ts";
+export { interpretResponse, type CapturedResponse } from "./response.ts";
+export { PROVIDER_FOR, createInterpreter, quotaHeaders, readRequest, usageFromJsonBody } from "./provider/index.ts";
 export {
   estimateTokens,
   type CallKind,

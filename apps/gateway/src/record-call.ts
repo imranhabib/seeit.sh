@@ -1,17 +1,16 @@
 // Everything that happens to a call after the response has started: read the
-// request, follow the turn, observe the response copy, then write the ledger
-// row, the log line and the JSON recording. None of it is on the hot path:
-// app.ts starts this without awaiting it.
+// request, follow the turn, capture the response copy, analyze the call
+// (analyzeCall in @seeit/core), then write the ledger row, the log line and
+// the JSON recording. None of it is on the hot path: app.ts starts this
+// without awaiting it.
 
-import { decideCompletion, readRequest, type Harness, type StreamSummary } from "@seeit/core";
-import { callRow, estimateUnreported, usageColumns } from "./call-row.ts";
+import { analyzeCall, readRequest, type CallFields, type Harness, type RecordedCall } from "@seeit/core";
+import { captureResponse } from "./capture.ts";
 import type { Config } from "./config.ts";
 import type { Ledger } from "./db/ledger.ts";
 import type { CallRow } from "./db/schema.ts";
-import { callFlags, createVersionCheck } from "./flags.ts";
+import { createVersionCheck } from "./flags.ts";
 import { logCall } from "./log.ts";
-import { observeResponse } from "./observe.ts";
-import { quotaHeaders, usageFromJsonBody } from "./provider/index.ts";
 import { decodeRequestText, parseResponseBody, writeRecording } from "./recorder.ts";
 import { redactHeaders } from "./redact.ts";
 import { createTurnTracker } from "./turns.ts";
@@ -57,60 +56,41 @@ export function createCallRecorder(config: Config, ledger: Ledger, hooks: Hooks 
     await new Promise((resolve) => setImmediate(resolve));
 
     const requestText = requestBody ? decodeRequestText(requestBody, requestHeaders.get("content-encoding")) : null;
+    // The turn tracker stays here until ADR 0008 moves turns to the ledger.
     const info = readRequest(harness, { method, path, headers: requestHeaders, body: parseJson(requestText) });
     const turnId = turns.turnFor(info);
-    const base = { id, startedAt, harness, method, path, info, turnId, timeToResponseHeadersMs };
 
-    let row: CallRow;
-    let responseText: string | null = null;
-    // What the response stream showed; stays null if analysis failed.
-    let stream: StreamSummary | null = null;
-    try {
-      const observed = await observeResponse(responseStream, harness, upstream?.headers.get("content-type") ?? null, start);
-      responseText = observed.text || null;
-      const s = (stream = observed.summary);
-      const completion = decideCompletion({
+    const captured = await captureResponse(responseStream, start);
+    // What the ledger service will receive (ADR 0007): redacted, parsed nowhere yet.
+    const recorded: RecordedCall = {
+      id,
+      startedAt,
+      harness,
+      method,
+      path,
+      turnId,
+      request: { headers: redactHeaders(requestHeaders), body: requestText },
+      response: {
         status: upstream?.status ?? null,
-        isStream: observed.isStream,
-        final: s.final,
-        errorType: s.errorType,
-        clientAborted: signal.aborted,
-        readFailed: observed.readFailed,
-        gatewayFailed: false,
-        connectivityCheck: info.kind === "connectivity",
-      });
-      const usage =
-        s.usage ??
-        (observed.isStream ? null : usageFromJsonBody(harness, observed.text)) ??
-        estimateUnreported(info, requestText, s.outputChars, completion);
+        headers: upstream ? redactHeaders(upstream.headers) : {},
+        body: captured.text || null,
+        pieces: captured.pieces,
+      },
+      timeToResponseHeadersMs,
+      timeToFirstChunkMs: captured.timeToFirstChunkMs,
+      timeToStreamEndMs: captured.timeToStreamEndMs,
+      clientAborted: signal.aborted,
+      readFailed: captured.readFailed,
+    };
+    const { fields, error } = analyzeCall(recorded);
+    if (error !== undefined) console.error(`[${harness}] analysis failed:`, error);
 
-      row = {
-        ...callRow(base),
-        httpStatus: upstream?.status ?? null,
-        completion,
-        errorType: s.errorType,
-        model: s.model ?? info.model,
-        ...usageColumns(usage),
-        timeToFirstChunkMs: observed.timeToFirstChunkMs,
-        timeToFirstTokenMs: s.timeToFirstTokenMs,
-        timeToStreamEndMs: observed.timeToStreamEndMs,
-        quota: upstream ? quotaHeaders(upstream.headers) : null,
-        serverToolUse: s.serverToolUse ? JSON.stringify(s.serverToolUse) : null,
-        unknownEvents: JSON.stringify(s.unknownEvents),
-        unknownUsageFields: JSON.stringify(s.unknownUsageFields),
-      };
-    } catch (err) {
-      console.error(`[${harness}] analysis failed:`, err);
-      row = { ...callRow(base), httpStatus: upstream?.status ?? null, completion: "gateway_error", ...usageColumns(null) };
-    }
+    // The version check reads the ledger, so it runs before this row is written.
+    const flags: string[] = [...fields.flags];
+    if (isFirstUntested(fields.harnessVersion)) flags.push("untested_harness_version");
+    const row = sqliteRow({ ...fields, flags });
 
-    // Invariant flags. The version check reads the ledger, so it runs
-    // before this row is written.
-    const flags = callFlags(row, stream);
-    if (isFirstUntested(row.harnessVersion)) flags.push("untested_harness_version");
-    row.flags = JSON.stringify(flags);
-
-    await ledger.record(row, { request: requestText, response: responseText });
+    await ledger.record(row, { request: requestText, response: recorded.response.body });
     logCall(row);
     hooks.onCall?.(row);
 
@@ -118,20 +98,29 @@ export function createCallRecorder(config: Config, ledger: Ledger, hooks: Hooks 
       id,
       harness,
       startedAt,
-      timings: {
-        timeToResponseHeadersMs,
-        timeToFirstChunkMs: row.timeToFirstChunkMs ?? null,
-        timeToStreamEndMs: row.timeToStreamEndMs ?? performance.now() - start,
-      },
+      timings: { timeToResponseHeadersMs, timeToFirstChunkMs: captured.timeToFirstChunkMs, timeToStreamEndMs: captured.timeToStreamEndMs },
       aborted: row.completion !== "complete",
-      request: { method, path, headers: redactHeaders(requestHeaders), body: parseJson(requestText) ?? requestText },
+      request: { method, path, headers: recorded.request.headers, body: parseJson(requestText) ?? requestText },
       response: {
-        status: upstream?.status ?? 0,
-        headers: upstream ? redactHeaders(upstream.headers) : {},
-        ...parseResponseBody(responseText ?? "", upstream?.headers.get("content-type") ?? null),
+        status: recorded.response.status ?? 0,
+        headers: recorded.response.headers,
+        ...parseResponseBody(recorded.response.body ?? "", upstream?.headers.get("content-type") ?? null),
       },
     });
     hooks.onRecorded?.(file);
+  };
+}
+
+/** SQLite stores JSON columns as text (apps/gateway/src/db/schema.ts). */
+function sqliteRow(f: Omit<CallFields, "flags"> & { flags: string[] }): CallRow {
+  const json = (v: unknown) => (v === null ? null : JSON.stringify(v));
+  return {
+    ...f,
+    serverToolUse: json(f.serverToolUse),
+    quota: json(f.quota),
+    flags: JSON.stringify(f.flags),
+    unknownEvents: json(f.unknownEvents),
+    unknownUsageFields: json(f.unknownUsageFields),
   };
 }
 

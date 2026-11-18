@@ -1,4 +1,4 @@
-# 0009 — Ledger data model: sessions, turns, tool uses, compactions
+# 0009 — Ledger data model: sessions, turns, tool uses, compactions, quota
 
 **Status:** accepted; implementation pending
 
@@ -53,6 +53,16 @@ tool_uses  PK (call_id, tool_use_id)
            plugin                        when it can be read from the names; else null
            duration_ms                   when the harness reports it; else null
            result_chars                  size of the result in the next request
+
+quota_windows  PK (call_id, window)       one row per plan-quota window a response reported
+           call_id → calls
+           harness, observed_at          the call's started_at
+           window                        Claude Code: '5h' | '7d' (and others it sends);
+                                         Codex: 'primary' | 'secondary', or '<limit_id>-primary' ...
+           used_percent                  0-100 (Claude Code sends 0-1 utilization; ×100)
+           resets_at                     Claude Code: <window>-reset; Codex: <window>-reset-at
+           window_minutes                Codex only (x-codex-<window>-window-minutes)
+           status                        Claude Code only ('allowed', ...)
 ```
 
 - **Tokens stay only on `calls`.** Session and turn totals are sums over
@@ -71,6 +81,12 @@ tool_uses  PK (call_id, tool_use_id)
   (seen live 2026-11-18, Iris `codex-mcp`).
 - **Plugins are a column, not a table.** A plugin is not an event; it supplies
   skills, MCP servers, and agents, and is read from their names.
+- **Quota is kept twice: raw and normalized.** `calls.quota` keeps every
+  quota header as sent (both harnesses send them on every turn call). The
+  ledger also writes one `quota_windows` row per window, in one shape for
+  both harnesses, for budget charts and forecasts (`/api/quota`, Phase 2).
+  Plan-level facts (Claude Code fallback and overage, Codex plan type,
+  credits, active limit) stay in `calls.quota`.
 - **Compaction is a property of a call.** The compaction request is one call,
   so its trigger is stored on that call.
 - **Hooks are not in this model.** They run inside the harness; see ADR 0010.

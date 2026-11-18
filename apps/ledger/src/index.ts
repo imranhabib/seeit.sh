@@ -19,15 +19,19 @@ function readConfig() {
   if (!/^\d+$/.test(portText) || port < 1 || port > 65535) {
     configError("SEEIT_LEDGER_PORT must be an integer from 1 to 65535");
   }
-  return { connectionString, port, hostname: process.env.SEEIT_LEDGER_HOST ?? "127.0.0.1" };
+  // The gateway's credential for POST /ingest/calls. Required: the ledger
+  // never accepts unauthenticated writes, even on loopback.
+  const writeToken = process.env.SEEIT_LEDGER_WRITE_TOKEN;
+  if (!writeToken) configError("SEEIT_LEDGER_WRITE_TOKEN is required");
+  return { connectionString, port, writeToken, hostname: process.env.SEEIT_LEDGER_HOST ?? "127.0.0.1" };
 }
 
 async function main() {
-  const { connectionString, port, hostname } = readConfig();
+  const { connectionString, port, writeToken, hostname } = readConfig();
   const database = await openDatabase(connectionString);
   let server: ReturnType<typeof serve>;
   try {
-    server = serve({ fetch: createApp(database).fetch, hostname, port }, (info) =>
+    server = serve({ fetch: createApp(database, { writeToken }).fetch, hostname, port }, (info) =>
       console.log(`seeit ledger on http://${info.address}:${info.port}`),
     );
   } catch (err) {

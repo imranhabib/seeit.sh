@@ -45,9 +45,9 @@ Where turn IDs come from:
 4. **Turn inputs are stored on each call,** as columns that outlive body
    retention: session ID, `startedAt`, sequence number, kind, agent ID,
    explicit turn ID, whether the request starts a turn, and the turn key
-   (block hashes, not text). Whether the gateway sends these already parsed or
-   the ledger derives them from the request body follows the separate
-   parser-placement decision (ADR 0007).
+   (block hashes, not text). The ledger derives them from the request body it
+   receives: parsing runs in the ledger (PLAN.md, service boundaries,
+   decided 2026-11-18).
 5. **Turn IDs are deterministic.** An explicit ID is used as is. An inferred
    turn takes the ID of the call that started it. Recomputing a session gives
    the same IDs, except for turns that a late call really changes.
@@ -88,8 +88,6 @@ Where turn IDs come from:
 
 ## Not decided here
 
-- Which other parsing moves from the gateway to the ledger (ADR 0007 leaves
-  it open).
 - The length of the quiet period before a session is settled.
 - Whether the other hint headers (`x-claude-code-request-class`,
   `x-claude-code-compaction`) replace or only check today's kind inference.

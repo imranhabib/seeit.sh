@@ -6,7 +6,7 @@ import { quotaHeaders } from "../../../src/provider/index.ts";
 describe("quotaHeaders", () => {
   it("keeps Anthropic's unified rate-limit headers", () => {
     const h = new Headers({ "anthropic-ratelimit-unified-5h-utilization": "0.25", "request-id": "req_1" });
-    expect(JSON.parse(quotaHeaders(h)!)).toEqual({ "anthropic-ratelimit-unified-5h-utilization": "0.25" });
+    expect(quotaHeaders(h)).toEqual({ "anthropic-ratelimit-unified-5h-utilization": "0.25" });
   });
 
   it("keeps the default and per-limit Codex windows, credits, and status headers", () => {
@@ -28,7 +28,7 @@ describe("quotaHeaders", () => {
       "x-codex-rate-limit-reached-type": "primary",
       "x-codex-promo-message": "Try the new model",
     };
-    expect(JSON.parse(quotaHeaders(new Headers({ ...codex, "x-oai-request-id": "r1", "x-codex-turn-state": "s", "x-models-etag": "e", "content-type": "text/event-stream" }))!)).toEqual(codex);
+    expect(quotaHeaders(new Headers({ ...codex, "x-oai-request-id": "r1", "x-codex-turn-state": "s", "x-models-etag": "e", "content-type": "text/event-stream" }))).toEqual(codex);
   });
 
   it("is null when the response has no quota headers", () => {

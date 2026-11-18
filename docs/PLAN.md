@@ -61,9 +61,11 @@ Morpheus remains in its existing separate repository.
 - **Ledger service:** owns recording ingestion, all application database reads
   and writes, schema migrations, retention, and derived analysis. The dashboard
   and CLI use its read endpoints. Write credentials belong to the gateway;
-  browser clients have read access only. Initial parser placement remains as
-  implemented; moving usage/context parsing out of the gateway is a separate
-  change and does not move the gateway's credential-scrubbing responsibility.
+  browser clients have read access only. Parsing runs in the ledger (decided
+  2026-11-18): the gateway sends a `RecordedCall` (redacted request and
+  response, piece arrival times, gateway-only facts; `packages/core/src/call.ts`)
+  and the ledger runs `analyzeCall`. Credential scrubbing stays in the
+  gateway. The gateway keeps its turn tracker until ADR 0008 is implemented.
 - **PostgreSQL:** the single target ledger database. The ledger owns access,
   but PostgreSQL runs as a separate process/container. Its placement can change
   without changing the gateway-to-ledger contract.
@@ -109,9 +111,9 @@ readiness; a running container alone is not a readiness check.
 - The gateway never waits for ledger ingestion or a database acknowledgement
   before forwarding provider chunks or finishing the harness response.
   Ledger downtime must not turn recording into a new forwarding dependency.
-- Initially send completed call metadata and captured bodies after collection
-  finishes, including interrupted-call records. Sending live recording streams
-  and moving parser work are separate implementation decisions.
+- Send each call after collection finishes, including interrupted-call
+  records, as one `RecordedCall`. Sending live recording streams is a
+  separate decision.
 - Generate a stable call ID before collection. Retrying a recording with that
   ID must not insert a second call, duplicate bodies, or double-count usage.
   Acknowledge successful ingestion only after its database transaction commits.
@@ -774,7 +776,7 @@ changes in one PR.
 | --- | --- | --- |
 | Architecture and contract requirements | Publish ADR 0007, service ownership, gateway-side credential scrubbing, read/write permissions, and ingestion acknowledgement/idempotency requirements. Specify v1 best-effort delivery and defer the durable outbox to v2. | Review success, duplicate, timeout, and failure scenarios; distinguish implemented behavior from the target architecture. |
 | PostgreSQL foundation | Add the standalone ledger package, native database setup, connection lifecycle, schema, and generated migrations. Preserve the latest parser fields and existing SQLite migration history. | Use a native PostgreSQL test database; store/read synthetic records and verify they remain after restart. No Docker requirement. |
-| Ledger data model | Add `sessions`, `turns`, and `tool_uses`, and the new `calls` columns (sequence number, provider request ID, compaction trigger and reason), as one PostgreSQL migration (ADR 0009). | Synthetic records for both harnesses store and read back; tool uses keep labels only; the schema-match test allows the PostgreSQL-only tables. Iris covers, for Claude Code and Codex: manual and automatic compaction, an MCP tool, a skill, a plugin, and Claude Code with hint headers on. |
+| Ledger data model | Add `sessions`, `turns`, `tool_uses`, and `quota_windows` (normalized plan-quota windows for both harnesses), and the new `calls` columns (sequence number, provider request ID, compaction trigger and reason), as one PostgreSQL migration (ADR 0009). | Synthetic records for both harnesses store and read back; tool uses keep labels only; the schema-match test allows the PostgreSQL-only tables. Iris covers, for Claude Code and Codex: manual and automatic compaction, an MCP tool, a skill, a plugin, and Claude Code with hint headers on. |
 | Recording ingestion | Add the authenticated write endpoint, concrete recording payload/validation, and transactional idempotent writes. Scrub recording credentials before they leave the gateway; never send raw authorization headers. The payload carries `startedAt` and a per-process sequence number, and the stored call keeps the turn inputs (ADR 0008). | Duplicate submissions count once; a successful acknowledgement follows commit; invalid or unauthorized payloads are rejected. |
 | Gateway delivery client | Add bounded in-memory pending recordings, request timeouts, retries, and observable failure/overflow handling. No durable outbox in v1. Keep the existing recording path until cutover. | Slow/unavailable ledger, lost acknowledgements, saturation, and restart-loss tests; no waiting on ingestion in the provider-streaming path. |
 | Storage cutover | Switch gateway recording to the ledger service and remove gateway database ownership. Decide and document import/preservation of existing SQLite history before switching. | Gateway needs no database credentials; real calls reach PostgreSQL with correct usage/flags; credential scrubbing leaves forwarded provider bytes unchanged; concurrent streaming tests pass. |

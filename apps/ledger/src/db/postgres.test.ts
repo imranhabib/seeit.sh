@@ -130,7 +130,7 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
   });
 
   it("reports ready without caching when the database answers", async () => {
-    const response = await createApp(database).request("/health");
+    const response = await createApp(database, { writeToken: "t" }).request("/health");
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({ status: "ready" });
@@ -139,7 +139,7 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
   it("returns unavailable without exception details when the database connection is closed", async () => {
     const disconnected = await openDatabase(connectionString);
     await disconnected.close();
-    const response = await createApp(disconnected).request("/health");
+    const response = await createApp(disconnected, { writeToken: "t" }).request("/health");
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ status: "unavailable" });
   });
@@ -154,7 +154,7 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
       await expect(
         promisify(execFile)(process.execPath, ["--import", "tsx", "src/index.ts"], {
           cwd: fileURLToPath(new URL("../..", import.meta.url)),
-          env: { ...process.env, SEEIT_LEDGER_DATABASE_URL: connectionString, SEEIT_LEDGER_PORT: String(port) },
+          env: { ...process.env, SEEIT_LEDGER_DATABASE_URL: connectionString, SEEIT_LEDGER_PORT: String(port), SEEIT_LEDGER_WRITE_TOKEN: "t" },
           timeout: 4000,
         }),
       ).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("[ledger] HTTP server failed") });
