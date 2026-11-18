@@ -13,12 +13,13 @@ import type { Harness } from "@seeit/core";
 import { Hono } from "hono";
 import type { Config } from "./config.ts";
 import type { Ledger } from "./db/ledger.ts";
+import type { Delivery } from "./delivery.ts";
 import { clientResponseHeaders, upstreamRequestHeaders } from "./forward.ts";
 import { createCallRecorder, type Hooks } from "./record-call.ts";
 
-export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}) {
+export function createApp(config: Config, ledger: Ledger, hooks: Hooks = {}, delivery?: Delivery) {
   const app = new Hono();
-  const recordCall = createCallRecorder(config, ledger, hooks);
+  const recordCall = createCallRecorder(config, ledger, hooks, delivery);
 
   app.all("/:harness/*", async (c) => {
     const harness = c.req.param("harness") as Harness;

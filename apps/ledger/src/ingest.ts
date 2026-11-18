@@ -27,6 +27,7 @@ export const MAX_RECORDING_BYTES = 64 * 1024 * 1024;
 
 export function createIngest(database: LedgerDatabase, writeToken: string) {
   const expected = digest(writeToken);
+  const isFirstUntested = createVersionCheck();
 
   return async function ingest(c: Context) {
     // Compare digests in constant time, so the response time says nothing about the token.
@@ -60,14 +61,9 @@ export function createIngest(database: LedgerDatabase, writeToken: string) {
         // version with no fixture. Asked before this row is written.
         const flags: string[] = [...fields.flags];
         const version = fields.harnessVersion;
-        if (version && !hasFixture(version)) {
-          const earlier = await tx
-            .select({ id: calls.id })
-            .from(calls)
-            .where(and(eq(calls.harnessVersion, version), isNotNull(calls.flags)))
-            .limit(1);
-          if (earlier.length === 0) flags.push("untested_harness_version");
-        }
+        const hasEarlier = async () =>
+          (await tx.select({ id: calls.id }).from(calls).where(and(eq(calls.harnessVersion, version!), isNotNull(calls.flags))).limit(1)).length > 0;
+        if (await isFirstUntested(version, hasEarlier)) flags.push("untested_harness_version");
         const inserted = await tx
           .insert(calls)
           .values({ ...fields, startedAt, flags })
@@ -82,6 +78,23 @@ export function createIngest(database: LedgerDatabase, writeToken: string) {
       console.error(`[ledger] storing call ${call.id} failed`);
       return c.json({ error: "storage unavailable" }, 503);
     }
+  };
+}
+
+/**
+ * Tells whether a call is the first one from a harness version with no
+ * fixture (ADR 0005, layer 3), like createVersionCheck in the gateway. The
+ * database answers across restarts; the set of versions already checked
+ * answers within this process, and is filled before the database is asked,
+ * so calls that arrive at the same moment are not all flagged (Codex sends
+ * two GET /models a few ms apart).
+ */
+export function createVersionCheck() {
+  const seen = new Set<string>();
+  return async function isFirstUntested(version: string | null, hasEarlierCheckedCall: () => Promise<boolean>): Promise<boolean> {
+    if (!version || hasFixture(version) || seen.has(version)) return false;
+    seen.add(version);
+    return !(await hasEarlierCheckedCall());
   };
 }
 

@@ -9,6 +9,7 @@ import { captureResponse } from "./capture.ts";
 import type { Config } from "./config.ts";
 import type { Ledger } from "./db/ledger.ts";
 import type { CallRow } from "./db/schema.ts";
+import type { Delivery } from "./delivery.ts";
 import { createVersionCheck } from "./flags.ts";
 import { logCall } from "./log.ts";
 import { decodeRequestText, parseResponseBody, writeRecording } from "./recorder.ts";
@@ -44,7 +45,7 @@ export type ProxiedCall = {
 };
 
 /** Returns the function that records one call. State (turns, versions seen) lives across calls. */
-export function createCallRecorder(config: Config, ledger: Ledger, hooks: Hooks = {}) {
+export function createCallRecorder(config: Config, ledger: Ledger, hooks: Hooks = {}, delivery?: Delivery) {
   const turns = createTurnTracker();
   const isFirstUntested = createVersionCheck(ledger);
 
@@ -82,6 +83,8 @@ export function createCallRecorder(config: Config, ledger: Ledger, hooks: Hooks 
       clientAborted: signal.aborted,
       readFailed: captured.readFailed,
     };
+    // To the ledger service, if configured (queued; never waited for).
+    delivery?.send(recorded);
     const { fields, error } = analyzeCall(recorded);
     if (error !== undefined) console.error(`[${harness}] analysis failed:`, error);
 

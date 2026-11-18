@@ -153,4 +153,11 @@ describe.skipIf(!testUrl)("PostgreSQL recording ingestion", () => {
     expect(await flagsOf("new-1")).toEqual(["untested_harness_version"]);
     expect(await flagsOf("new-2")).toEqual([]);
   });
+
+  // Seen live (2026-11-18): Codex sends two GET /models calls a few ms apart.
+  it("flags only one of several calls from a new version that arrive at the same moment", async () => {
+    await Promise.all(Array.from({ length: 10 }, (_, i) => post(claudeCall(`same-${i}`, "claude-cli/8.8.8"))));
+    const rows = await database.db.select({ flags: calls.flags }).from(calls).where(eq(calls.harnessVersion, "claude-cli/8.8.8"));
+    expect(rows.filter((r) => r.flags?.includes("untested_harness_version"))).toHaveLength(1);
+  });
 });

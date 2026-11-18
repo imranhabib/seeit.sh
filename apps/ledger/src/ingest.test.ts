@@ -2,7 +2,7 @@ import type { RecordedCall } from "@seeit/core";
 import { describe, expect, it } from "vitest";
 import { createApp } from "./app.ts";
 import type { LedgerDatabase } from "./db/database.ts";
-import { MAX_RECORDING_BYTES, checkRecordedCall } from "./ingest.ts";
+import { MAX_RECORDING_BYTES, checkRecordedCall, createVersionCheck } from "./ingest.ts";
 
 // These checks happen before the database is used, so no PostgreSQL is needed.
 const noDatabase = {} as LedgerDatabase;
@@ -68,5 +68,24 @@ describe("checkRecordedCall", () => {
     ["flags", { clientAborted: "no" }, "clientAborted and readFailed must be booleans"],
   ])("names a bad %s", (_name, change, problem) => {
     expect(checkRecordedCall({ ...valid(), ...change })).toBe(problem);
+  });
+});
+
+describe("createVersionCheck", () => {
+  it("flags one of several calls from a new version that arrive at the same moment", async () => {
+    const isFirstUntested = createVersionCheck();
+    let asked = 0;
+    // The database is slow to answer, so all calls are in flight together.
+    const hasEarlier = () => new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 10 + asked++));
+    const answers = await Promise.all(Array.from({ length: 5 }, () => isFirstUntested("claude-cli/9.9.9", hasEarlier)));
+    expect(answers.filter(Boolean)).toHaveLength(1);
+    expect(asked).toBe(1);
+  });
+
+  it("asks the database for a version this process has not seen, and never for a tested one", async () => {
+    const isFirstUntested = createVersionCheck();
+    expect(await isFirstUntested("claude-cli/9.9.9", async () => true)).toBe(false); // an earlier checked row exists
+    expect(await isFirstUntested("claude-cli/2.1.322", async () => false)).toBe(false); // has a fixture
+    expect(await isFirstUntested(null, async () => false)).toBe(false);
   });
 });
