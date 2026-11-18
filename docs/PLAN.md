@@ -93,8 +93,9 @@ loopback. Cloud harnesses use the private gateway URL.
 Use Docker images for cloud gateway and ledger deployment and Compose for the
 local container stack. Compose on one host does not provide cross-instance
 scaling. Separate cloud deployments can receive independent resources;
-horizontal gateway replicas also require coordinated turn tracking and future
-budget counters before they are safe. Do not introduce orchestration as part
+horizontal gateway replicas also require coordinated future budget counters
+before they are safe. Turn tracking does not need coordination once the ledger
+assigns turns ([ADR 0008](adr/0008-turn-assignment-in-the-ledger.md)). Do not introduce orchestration as part
 of the frontend work.
 
 PostgreSQL data must survive application/container restarts and replacement in
@@ -167,8 +168,12 @@ These rules are the performance-critical part of the system:
 - **Trace hierarchy:** Session → Turn → Call.
   - Session: one `claude` / `codex` run.
   - Turn: one prompt the user types, plus every model call and tool loop until
-    the final answer. Inferred (best effort): a new turn starts when the last
-    message is new user text, not a `tool_result`.
+    the final answer. Taken from the harness when it sends a turn ID (Codex
+    `turn_id`; Claude Code `x-claude-code-prompt-id` with
+    `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`). Otherwise inferred (best effort): a
+    new turn starts when the last message is new user text, not a
+    `tool_result`. The ledger assigns turns, and recent ones can change when a
+    late call arrives ([ADR 0008](adr/0008-turn-assignment-in-the-ledger.md)).
   - Call: one HTTP request to the model.
 - **Call kind: not every call is a turn.** Harnesses also send background
   calls that the user did not trigger, for example Claude Code's
@@ -180,6 +185,9 @@ These rules are the performance-critical part of the system:
   row per call with harness, session, turn, model, input / output / cache-read /
   cache-write tokens, estimated cost, latency. It is the source of truth for
   budgets and the custom dashboard, owned by the separate ledger service.
+  Sessions, turns, tool uses (tools, MCP, skills, subagents, plugins), and
+  compactions are added in [ADR 0009](adr/0009-ledger-data-model.md); hook
+  events are open in [ADR 0010](adr/0010-hook-events.md).
 - **Timings per call** (milliseconds from when the gateway received the
   request, measured with the monotonic `performance.now()` clock):
   - `timeToResponseHeadersMs`: upstream status and headers arrived. Network,
@@ -766,9 +774,11 @@ changes in one PR.
 | --- | --- | --- |
 | Architecture and contract requirements | Publish ADR 0007, service ownership, gateway-side credential scrubbing, read/write permissions, and ingestion acknowledgement/idempotency requirements. Specify v1 best-effort delivery and defer the durable outbox to v2. | Review success, duplicate, timeout, and failure scenarios; distinguish implemented behavior from the target architecture. |
 | PostgreSQL foundation | Add the standalone ledger package, native database setup, connection lifecycle, schema, and generated migrations. Preserve the latest parser fields and existing SQLite migration history. | Use a native PostgreSQL test database; store/read synthetic records and verify they remain after restart. No Docker requirement. |
-| Recording ingestion | Add the authenticated write endpoint, concrete recording payload/validation, and transactional idempotent writes. Scrub recording credentials before they leave the gateway; never send raw authorization headers. | Duplicate submissions count once; a successful acknowledgement follows commit; invalid or unauthorized payloads are rejected. |
+| Ledger data model | Add `sessions`, `turns`, and `tool_uses`, and the new `calls` columns (sequence number, provider request ID, compaction trigger and reason), as one PostgreSQL migration (ADR 0009). | Synthetic records for both harnesses store and read back; tool uses keep labels only; the schema-match test allows the PostgreSQL-only tables. Iris covers, for Claude Code and Codex: manual and automatic compaction, an MCP tool, a skill, a plugin, and Claude Code with hint headers on. |
+| Recording ingestion | Add the authenticated write endpoint, concrete recording payload/validation, and transactional idempotent writes. Scrub recording credentials before they leave the gateway; never send raw authorization headers. The payload carries `startedAt` and a per-process sequence number, and the stored call keeps the turn inputs (ADR 0008). | Duplicate submissions count once; a successful acknowledgement follows commit; invalid or unauthorized payloads are rejected. |
 | Gateway delivery client | Add bounded in-memory pending recordings, request timeouts, retries, and observable failure/overflow handling. No durable outbox in v1. Keep the existing recording path until cutover. | Slow/unavailable ledger, lost acknowledgements, saturation, and restart-loss tests; no waiting on ingestion in the provider-streaming path. |
 | Storage cutover | Switch gateway recording to the ledger service and remove gateway database ownership. Decide and document import/preservation of existing SQLite history before switching. | Gateway needs no database credentials; real calls reach PostgreSQL with correct usage/flags; credential scrubbing leaves forwarded provider bytes unchanged; concurrent streaming tests pass. |
+| Turn assignment in the ledger | Assign turns in the ledger (ADR 0008): explicit turn ID first, then inference in `(startedAt, seq)` order; deterministic turn IDs; append in order, replay the session for a late call; recompute turn-dependent flags and totals. Remove the gateway's turn tracker. | Late, reordered, duplicated, and lost calls (synthetic sessions for both harnesses) give the expected turns; recompute keeps unaffected turn IDs; Iris turn scenarios match the gateway's results before cutover. |
 | Ledger read API | Adapt PR #5's metadata selection, validation, pagination, errors, and tests to the separate ledger service with PostgreSQL. | Filtering, null/estimate semantics, safe JSON failures, and read/write authorization; dashboard reads never enter the gateway process. |
 | Docker local packaging | Add gateway/ledger images, Compose, health checks, configuration examples, and persistent PostgreSQL volumes. Reuse the native application entry points. | Run the same ingestion/read/outage scenarios natively and with Compose; restart/recreate services and verify committed data remains. |
 
@@ -776,12 +786,16 @@ Native setup and commands are delivered with the ledger foundation, not held
 until the Docker PR. Do not make native scripts depend on a container database.
 The cloud milestone later reuses these images and delivery rules on separate
 instances. Independent horizontal gateway scaling is separate work because
-turn state and future budget counters need coordination.
+future budget counters need coordination; turn state moves to the ledger
+(ADR 0008).
 
 Treat PR #5's gateway-mounted SQLite API as a draft precursor, not the service
 boundary to merge. Its field selection, validation, errors, and tests are
 useful inputs to the ledger read API PR. Parser scenario recordings and other
-remaining parser follow-ups can proceed separately from this milestone.
+remaining parser follow-ups can proceed separately from this milestone. That
+includes reading Claude Code's `x-claude-code-prompt-id` as the explicit turn
+ID, with inference as the fallback (ADR 0008): it can land first, in today's
+gateway tracker, with Iris runs that set `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`.
 
 ### Phase 2 — Observability
 
