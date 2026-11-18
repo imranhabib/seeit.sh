@@ -86,7 +86,11 @@ critical:
 
 ## Testing
 
-- Vitest. Tests sit next to the code as `*.test.ts`.
+- Vitest. In `packages/core`, tests live in `tests/unit/`, which mirrors
+  `src/` (for example `src/provider/anthropic/stream.ts` is tested by
+  `tests/unit/provider/anthropic/stream.test.ts`), so code and tests stay
+  apart. Other packages still keep `*.test.ts` next to the code until they
+  move to the same layout.
 - Parser tests use recorded SSE fixtures. Feed them in small, odd-sized chunks
   so chunk-boundary bugs show up.
 - Parser coverage follows [ADR 0005](docs/adr/0005-parser-coverage-strategy.md):

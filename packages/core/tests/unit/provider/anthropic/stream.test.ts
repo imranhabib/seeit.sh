@@ -1,29 +1,7 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { decideCompletion } from "./completion.ts";
-import { createSseParser } from "./sse.ts";
-import { createInterpreter, type Provider, type StreamSummary } from "./stream.ts";
+import { before, fixture, run, runEvents } from "../helpers.ts";
 
-const fixture = (name: string) => readFileSync(new URL(`../fixtures/${name}`, import.meta.url), "utf8");
 const CLAUDE = fixture("anthropic-claude-2.1.322.sse");
-const CODEX_153 = fixture("openai-codex-0.153.4.sse");
-const CODEX_169 = fixture("openai-codex-desktop-0.169.0.sse");
-
-/** Feed text in fixed-size chunks; each chunk "arrives" 10 ms after the previous one. */
-function run(provider: Provider, text: string, chunkSize = 37): StreamSummary {
-  const parser = createSseParser();
-  const interpreter = createInterpreter(provider);
-  let atMs = 0;
-  for (let i = 0; i < text.length; i += chunkSize) {
-    atMs += 10;
-    for (const e of parser.push(text.slice(i, i + chunkSize))) interpreter.onEvent(e, atMs);
-  }
-  for (const e of parser.flush()) interpreter.onEvent(e, atMs);
-  return interpreter.summary();
-}
-
-/** The fixture text up to (not including) the first event of this type. */
-const before = (text: string, eventType: string) => text.slice(0, text.indexOf(`event: ${eventType}\n`));
 
 describe("anthropic interpreter", () => {
   it("reads model, final usage, and first token from a complete stream", () => {
@@ -74,51 +52,6 @@ describe("anthropic interpreter", () => {
     expect(s.final).toBe(false);
   });
 });
-
-describe("openai responses interpreter", () => {
-  it.each([
-    ["0.153.4", CODEX_153, { inputTokens: 101591 - 3712, cacheReadTokens: 3712, outputTokens: 5 }],
-    ["0.169.0 (desktop)", CODEX_169, { inputTokens: 20065, cacheReadTokens: 0, outputTokens: 5 }],
-  ])("reads usage from Codex %s, converting input to exclude cached tokens", (_v, text, usage) => {
-    const s = run("openai-responses", text);
-    expect(s.model).toBe("gpt-6.1-sol");
-    expect(s.final).toBe(true);
-    expect(s.usage).toMatchObject({ ...usage, cacheWriteTokens: 0, estimated: false });
-    expect(s.timeToFirstTokenMs).toBeGreaterThan(0);
-  });
-
-  // Field from codex-rs/codex-api/src/sse/responses.rs (ResponseCompletedUsage) at
-  // openai/codex@9537934ed6d5a6658fc77032b3290650765466a1. Our fixtures predate it.
-  it("reads codex_rollout_budget_units when present, and null when missing", () => {
-    const withUnits = CODEX_169.replace('"usage":{', '"usage":{"codex_rollout_budget_units":2.5,');
-    expect(withUnits).not.toBe(CODEX_169);
-    expect(run("openai-responses", withUnits).usage?.codexRolloutBudgetUnits).toBe(2.5);
-    expect(run("openai-responses", CODEX_169).usage?.codexRolloutBudgetUnits).toBeNull();
-  });
-
-  it("has no usage when the stream is cut before response.completed", () => {
-    const s = run("openai-responses", before(CODEX_169, "response.completed"));
-    expect(s.final).toBe(false);
-    expect(s.usage).toBeNull();
-    expect(s.outputChars).toBe("pong".length);
-  });
-});
-
-// --- Spec-derived tests (ADR 0005, layer 1; PLAN.md follow-up step 2) ---------
-// Built from documented examples, one event every 10 ms, so a test can say
-// exactly which event set a timing.
-
-/** Turn objects into SSE text and run them; event i arrives at (i + 1) * 10 ms. */
-function runEvents(provider: Provider, events: object[]): StreamSummary {
-  const parser = createSseParser();
-  const interpreter = createInterpreter(provider);
-  events.forEach((e, i) => {
-    const type = (e as { type: string }).type;
-    for (const ev of parser.push(`event: ${type}\ndata: ${JSON.stringify(e)}\n\n`)) interpreter.onEvent(ev, (i + 1) * 10);
-  });
-  for (const ev of parser.flush()) interpreter.onEvent(ev, events.length * 10);
-  return interpreter.summary();
-}
 
 const textDelta = (index: number, text: string) => ({ type: "content_block_delta", index, delta: { type: "text_delta", text } });
 const blockStart = (index: number, content_block: object) => ({ type: "content_block_start", index, content_block });
@@ -283,45 +216,10 @@ describe("spec: several message_delta events", () => {
   });
 });
 
-// Sources: OpenAI Node SDK stream event types, src/resources/responses/responses.ts at
-// openai/openai-node@4517ca801b79a93ccc17826b0b63ba2313355307; Codex's parser,
-// codex-rs/codex-api/src/sse/responses.rs at openai/codex@9537934ed6d5a6658fc77032b3290650765466a1.
-describe("spec: OpenAI Responses output and errors", () => {
-  const created = { type: "response.created", response: { model: "gpt-6.1-sol" } };
-
-  it("counts only model-output deltas, and not empty ones", () => {
-    const s = runEvents("openai-responses", [
-      created,
-      // Output of a shell command the server ran: tool output, not model output.
-      { type: "response.shell_call_output_content.delta", item_id: "sh_1", output_index: 0, command_index: 0, delta: { stdout: "file.txt\n" } },
-      { type: "response.reasoning_summary_text.delta", item_id: "rs_1", output_index: 0, summary_index: 0, delta: "" },
-      { type: "response.output_text.delta", item_id: "msg_1", output_index: 1, content_index: 0, delta: "pong" },
-    ]);
-    expect(s.timeToFirstTokenMs).toBe(40);
-    expect(s.outputChars).toBe("pong".length);
-  });
-
-  it("records the model from response.created and from response.completed", () => {
-    const s = runEvents("openai-responses", [created, { type: "response.completed", response: { model: "gpt-6.1-other", usage: { input_tokens: 10, output_tokens: 1 } } }]);
-    expect(s).toMatchObject({ startModel: "gpt-6.1-sol", model: "gpt-6.1-other", fallback: false });
-  });
-
-  it("reads the error code from an error event and from response.failed", () => {
-    expect(runEvents("openai-responses", [created, { type: "error", code: "server_error", message: "boom", param: null, sequence_number: 1 }]).errorType).toBe("server_error");
-    expect(
-      runEvents("openai-responses", [created, { type: "response.failed", response: { status: "failed", error: { code: "rate_limit_exceeded", message: "..." }, usage: null } }]).errorType,
-    ).toBe("rate_limit_exceeded");
-  });
-});
-
 // Drift detection (ADR 0005, layer 3; PLAN.md follow-up step 1).
 describe("unknown events and usage fields", () => {
-  it.each([
-    ["anthropic", CLAUDE],
-    ["openai-responses", CODEX_153],
-    ["openai-responses", CODEX_169],
-  ] as const)("finds none in the %s fixture", (provider, text) => {
-    const s = run(provider, text);
+  it("finds none in the anthropic fixture", () => {
+    const s = run("anthropic", CLAUDE);
     expect(s.unknownEvents).toEqual({});
     expect(s.unknownUsageFields).toEqual([]);
   });
@@ -366,44 +264,5 @@ describe("unknown events and usage fields", () => {
     ]);
     expect(s.outputChars).toBe("Summary so far.".length);
     expect(s.unknownEvents).toEqual({});
-  });
-
-  it("counts OpenAI Responses event types and lists usage fields it does not know", () => {
-    const extra = 'event: response.brand_new\ndata: {"type":"response.brand_new"}\n\n';
-    const text = before(CODEX_169, "response.completed") + extra + CODEX_169.slice(CODEX_169.indexOf("event: response.completed\n")).replace('"usage":{', '"usage":{"new_counter":1,');
-    const s = run("openai-responses", text);
-    expect(s.unknownEvents).toEqual({ "response.brand_new": 1 });
-    expect(s.unknownUsageFields).toEqual(["new_counter"]);
-  });
-});
-
-describe("decideCompletion", () => {
-  const base = { status: 200, isStream: true, final: false, errorType: null, clientAborted: false, readFailed: false, gatewayFailed: false, connectivityCheck: false };
-
-  it("is complete when the final event arrived, even if the connection then closed (Codex)", () => {
-    expect(decideCompletion({ ...base, final: true, clientAborted: true, readFailed: true })).toBe("complete");
-  });
-  it("is upstream_error for an error event or an HTTP error", () => {
-    expect(decideCompletion({ ...base, errorType: "overloaded_error" })).toBe("upstream_error");
-    expect(decideCompletion({ ...base, status: 429, isStream: false })).toBe("upstream_error");
-  });
-  it("is client_aborted when the harness left before the final event", () => {
-    expect(decideCompletion({ ...base, clientAborted: true, readFailed: true })).toBe("client_aborted");
-  });
-  it("is upstream_dropped when upstream failed or the stream ended early", () => {
-    expect(decideCompletion({ ...base, readFailed: true })).toBe("upstream_dropped");
-    expect(decideCompletion({ ...base })).toBe("upstream_dropped");
-    expect(decideCompletion({ ...base, status: null })).toBe("upstream_dropped");
-  });
-  it("is complete for a non-streaming body read to the end", () => {
-    expect(decideCompletion({ ...base, isStream: false })).toBe("complete");
-  });
-  // PLAN.md, live-run finding 1: Claude Code 2.1.133's HEAD /claude gets a 404. Any answer means the check worked.
-  it("is complete for a connectivity check that got any answer, even a 404", () => {
-    expect(decideCompletion({ ...base, connectivityCheck: true, isStream: false, status: 404 })).toBe("complete");
-    expect(decideCompletion({ ...base, connectivityCheck: true, isStream: false, status: null })).toBe("upstream_dropped");
-  });
-  it("is gateway_error when the gateway itself failed", () => {
-    expect(decideCompletion({ ...base, final: true, gatewayFailed: true })).toBe("gateway_error");
   });
 });
