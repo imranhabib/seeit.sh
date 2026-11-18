@@ -36,7 +36,21 @@ const HOOK_SETTINGS = {
   },
 };
 
-export async function resetSandbox(dir: string, options: { hook?: boolean } = {}): Promise<void> {
+/**
+ * A skill both harnesses can load from the repository: Claude Code from
+ * .claude/skills, Codex from .agents/skills (codex-rs/ext/skills/src/host_roots.rs).
+ * Its body holds a fixed phrase, so the chaos proxy can see when the skill's
+ * content reached a request.
+ */
+const SKILL = `---
+name: iris-note
+description: Answers the Iris question. Use when asked for the Iris answer.
+---
+
+Iris skill note: the answer is 47.
+`;
+
+export async function resetSandbox(dir: string, options: { hook?: boolean; skill?: boolean } = {}): Promise<void> {
   await mkdir(dir, { recursive: true });
   const entries = await readdir(dir);
   if (entries.length > 0 && !entries.includes(MARKER)) {
@@ -48,6 +62,10 @@ export async function resetSandbox(dir: string, options: { hook?: boolean } = {}
   if (options.hook) {
     files[".claude/settings.json"] = JSON.stringify(HOOK_SETTINGS, null, 2) + "\n";
     files[".codex/hooks.json"] = JSON.stringify(HOOK_SETTINGS, null, 2) + "\n";
+  }
+  if (options.skill) {
+    files[".claude/skills/iris-note/SKILL.md"] = SKILL;
+    files[".agents/skills/iris-note/SKILL.md"] = SKILL;
   }
   for (const [path, content] of Object.entries(files)) {
     await mkdir(dirname(join(dir, path)), { recursive: true });

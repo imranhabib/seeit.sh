@@ -11,13 +11,15 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { Harness } from "@seeit/core";
 import { startChaosProxy, type ChaosProxy, type Observed } from "./chaos-proxy.ts";
 import { checkScenario } from "./check.ts";
 import { loadIrisConfig, type IrisConfig } from "./config.ts";
-import { claudeCommand, codexCommand, startCommand, type RunningCommand } from "./drivers/headless.ts";
+import { runAppServerSteps } from "./drivers/app-server.ts";
+import { claudeCommand, codexAppServerCommand, codexCommand, codexPluginCommands, startCommand, type Command, type RunningCommand } from "./drivers/headless.ts";
 import { startGateway, type RunningGateway } from "./gateway.ts";
 import { waitForCalls, type CallRecord } from "./results.ts";
 import { resetSandbox } from "./sandbox.ts";
@@ -30,10 +32,17 @@ const PROVIDERS: Record<Harness, string> = {
 
 // Text to look for in request bodies. "leak-*" needles must never be found:
 // they would mean the user's own setup reached a request (see check.ts).
-const NEEDLES = {
+// The others are fixed phrases from the Iris hook, skill, plugin, and MCP
+// server: found in a request, they prove the feature's output reached the model.
+const NEEDLES: Record<string, string | RegExp> = {
   "hook-note": "Project note: this sandbox uses 2-space indentation.",
-  "leak-home-skills": "/.agents/skills",
-  "leak-mcp-tools": '"name":"mcp__',
+  "skill-note": "Iris skill note: the answer is 47.",
+  "plugin-note": "Iris plugin note: the answer is 83.",
+  "mcp-echo": "Iris MCP echo:",
+  // The user's own skills folder (the sandbox's .agents/skills is Iris's).
+  "leak-home-skills": join(homedir(), ".agents", "skills"),
+  // Any MCP tool except the Iris server's own.
+  "leak-mcp-tools": /"name":"mcp__(?!iris__)/,
 };
 
 type ScenarioResult = {
@@ -76,6 +85,10 @@ async function main() {
   await mkdir(join(runDir, "logs"), { recursive: true });
   console.log(`iris: ${scenarios.length} scenario(s); ${versions.claude}; ${versions.codex}`);
   console.log(`iris: run folder ${runDir}`);
+
+  // An Iris plugin left in CODEX_HOME by an interrupted run would reach
+  // every Codex request, so remove it first.
+  if (scenarios.some((s) => s.harness === "codex")) await runQuietly(codexPluginCommands(config, process.env).remove, config.sandbox, join(runDir, "logs", "plugin-cleanup.log"));
 
   const proxy = await startChaosProxy(PROVIDERS, NEEDLES);
   const gateway = await startGateway({
@@ -142,19 +155,32 @@ async function runScenario(
   });
 
   let error: string | null = null;
+  const plugin = scenario.plugin && scenario.harness === "codex" ? codexPluginCommands(config, process.env) : null;
+  const pluginLog = join(runDir, "logs", `${scenario.id}-plugin.log`);
+  // The manifest keeps the start of each prompt only (some are long filler).
+  const short = (prompt: string) => (prompt.length > 200 ? `${prompt.slice(0, 200)}...` : prompt);
   try {
-    await resetSandbox(config.sandbox, { hook: scenario.hook });
+    await resetSandbox(config.sandbox, { hook: scenario.hook, skill: scenario.skill });
+    if (plugin && !(await runQuietly(plugin.install, config.sandbox, pluginLog))) throw new Error(`plugin install failed; see ${pluginLog}`);
     if (fault) proxy.armNextTurn(scenario.harness, { afterTextDeltas: fault.afterTextDeltas, cut: fault.action === "cut" });
-    for (const [i, step] of scenario.steps.entries()) {
-      const build = scenario.harness === "claude" ? claudeCommand : codexCommand;
-      const command = build(scenario, step, gateway.url, config, process.env);
-      const log = join(runDir, "logs", `${scenario.id}-${i + 1}.log`);
-      running = startCommand(command, config.sandbox, log);
-      const { exitCode, durationMs } = await running.done;
-      result.steps.push({ prompt: step.prompt, exitCode, durationMs, log });
+    if (scenario.driver === "app-server") {
+      const log = join(runDir, "logs", `${scenario.id}.log`);
+      const command = codexAppServerCommand(scenario, gateway.url, config, process.env);
+      for (const r of await runAppServerSteps(command, scenario.steps, config.sandbox, log)) result.steps.push({ ...r, prompt: short(r.prompt), log });
+    } else {
+      for (const [i, step] of scenario.steps.entries()) {
+        const build = scenario.harness === "claude" ? claudeCommand : codexCommand;
+        const command = build(scenario, step, gateway.url, config, process.env);
+        const log = join(runDir, "logs", `${scenario.id}-${i + 1}.log`);
+        running = startCommand(command, config.sandbox, log);
+        const { exitCode, durationMs } = await running.done;
+        result.steps.push({ prompt: short(step.prompt), exitCode, durationMs, log });
+      }
     }
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
+  } finally {
+    if (plugin) await runQuietly(plugin.remove, config.sandbox, pluginLog);
   }
 
   // The gateway writes each row in the background after its response ends.
@@ -165,6 +191,16 @@ async function runScenario(
   result.problems = checkScenario(scenario, { exitCodes: result.steps.map((s) => s.exitCode), rows, observed: result.observed, faultHappened: result.faultHappened });
   if (error) result.problems.unshift(`iris error: ${error}`);
   return { result, rows };
+}
+
+/** Run setup commands one after another; true when all succeeded. Output goes to `logFile`. */
+async function runQuietly(commands: Command[], cwd: string, logFile: string): Promise<boolean> {
+  let ok = true;
+  for (const [i, command] of commands.entries()) {
+    const { exitCode } = await startCommand(command, cwd, `${logFile}.${i + 1}`).done;
+    if (exitCode !== 0) ok = false;
+  }
+  return ok;
 }
 
 function checkPrerequisites(config: IrisConfig, scenarios: Scenario[]) {

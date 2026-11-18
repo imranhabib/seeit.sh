@@ -14,6 +14,8 @@ export type Step = {
   prompt: string;
   /** Continue the previous step's session (claude --continue / codex exec resume --last). */
   continue?: boolean;
+  /** Codex app-server driver only: compact the thread instead of sending the prompt. */
+  compact?: boolean;
 };
 
 export type Expect = {
@@ -44,6 +46,17 @@ export type Scenario = {
   expect: Expect;
   /** Add the UserPromptSubmit hook to the sandbox (both harnesses). */
   hook?: boolean;
+  /** Add the iris-note skill to the sandbox (both harnesses). */
+  skill?: boolean;
+  /** Give the harness the Iris MCP server (fixtures/mcp-server.mjs). */
+  mcp?: boolean;
+  /** Load the Iris plugin: --plugin-dir for Claude Code; installed into Iris's CODEX_HOME for Codex. */
+  plugin?: boolean;
+  /**
+   * Codex only: run the steps through `codex app-server` instead of
+   * `codex exec`, for steps exec cannot do (a manual compaction).
+   */
+  driver?: "app-server";
   /**
    * During the first step, after this many answer-text deltas of a turn:
    * "cut" drops the provider connection; "interrupt" sends Ctrl+C to the harness.
@@ -56,7 +69,7 @@ export type Scenario = {
    * lightweight model at the default effort may not think at all.
    */
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
-  /** Keep slash commands (needed for /compact); off by default to skip account-synced skills. */
+  /** Keep slash commands (needed for /compact, skills, and plugins); off by default to skip account-synced skills. */
   slashCommands?: boolean;
   /** Extra environment for the harness process. */
   env?: Record<string, string>;
@@ -86,7 +99,8 @@ export const SCENARIOS: Scenario[] = [
     about: "Many calls in one turn: tool_use / tool_result loop",
     allowedTools: EDIT_AND_TEST,
     steps: [{ prompt: TOOL_LOOP }],
-    expect: { turns: 1, saw: ["block:tool_use"] },
+    // hint:*: the gateway hint headers name the prompt and request class (ADR 0008).
+    expect: { turns: 1, saw: ["block:tool_use", "hint:prompt-id", "hint:request-class:main"] },
   },
   {
     id: "codex-tool-loop",
@@ -101,7 +115,7 @@ export const SCENARIOS: Scenario[] = [
     about: "Subagent calls stay in the turn that started them (x-claude-code-agent-id)",
     allowedTools: [...READ_ONLY, "Task", "Agent"],
     steps: [{ prompt: "Use a subagent to find every TODO comment in this repository, then summarize what it found." }],
-    expect: { turns: 1, subagents: 1 },
+    expect: { turns: 1, subagents: 1, saw: ["hint:request-class:subagent"] },
   },
   {
     id: "claude-parallel-subagents",
@@ -138,7 +152,11 @@ export const SCENARIOS: Scenario[] = [
       { prompt: "/compact", continue: true },
       { prompt: "What did we talk about so far?", continue: true },
     ],
-    expect: { turns: 5 },
+    // The /compact call still counts as a turn: the parser does not read the
+    // compaction header yet (ADR 0009 makes it background). No
+    // x-claude-code-context-compacted: each -p step is a new process, and
+    // the next process did not send it (seen 2026-11-18).
+    expect: { turns: 5, saw: ["hint:compaction:manual", "hint:request-class:compaction"] },
   },
   {
     id: "codex-compaction",
@@ -153,7 +171,19 @@ export const SCENARIOS: Scenario[] = [
       { prompt: "Now write a 500-word explanation of the Node.js event loop.", continue: true },
       { prompt: "What did we talk about so far? Answer in two sentences.", continue: true },
     ],
-    expect: { turns: 4, saw: ["request-kind:compaction"] },
+    expect: { turns: 4, saw: ["request-kind:compaction", "compaction-trigger:auto"] },
+  },
+  {
+    id: "codex-manual-compaction",
+    harness: "codex",
+    about: "Manual compaction (/compact; thread/compact/start through codex app-server): a background call, trigger manual",
+    driver: "app-server",
+    steps: [
+      { prompt: "Without using any tools, explain in two sentences what a JavaScript module is." },
+      { prompt: "/compact", compact: true },
+      { prompt: "What did we talk about so far? Answer in one sentence." },
+    ],
+    expect: { turns: 2, saw: ["request-kind:compaction", "compaction-trigger:manual"] },
   },
   {
     id: "codex-hook",
@@ -171,6 +201,59 @@ export const SCENARIOS: Scenario[] = [
     allowedTools: READ_ONLY,
     steps: [{ prompt: "Which indentation does this project use? Answer in one sentence." }],
     expect: { turns: 1, saw: ["request:hook-note"] },
+  },
+  {
+    id: "claude-mcp",
+    harness: "claude",
+    about: "An MCP tool (mcp__iris__echo) from the Iris MCP server",
+    mcp: true,
+    allowedTools: ["mcp__iris__echo"],
+    steps: [{ prompt: "Call the echo tool from the iris MCP server with the text hello, then tell me what it returned." }],
+    expect: { turns: 1, saw: ["tool:mcp__iris__echo", "request:mcp-echo"] },
+  },
+  {
+    id: "codex-mcp",
+    harness: "codex",
+    about: "An MCP tool from the Iris MCP server, called from JavaScript in the exec tool (code mode)",
+    mcp: true,
+    steps: [{ prompt: "Call the echo tool from the iris MCP server with the text hello, then tell me what it returned." }],
+    expect: { turns: 1, saw: ["exec-tool:mcp__iris__echo", "request:mcp-echo"] },
+  },
+  {
+    id: "claude-skill",
+    harness: "claude",
+    about: "A repository skill (.claude/skills), loaded with the Skill tool",
+    skill: true,
+    slashCommands: true,
+    allowedTools: [...READ_ONLY, "Skill"],
+    steps: [{ prompt: "Use the iris-note skill to tell me the Iris answer." }],
+    expect: { turns: 1, saw: ["tool:Skill", "request:skill-note"] },
+  },
+  {
+    id: "codex-skill",
+    harness: "codex",
+    about: "A repository skill (.agents/skills), mentioned explicitly with $iris-note",
+    skill: true,
+    steps: [{ prompt: "$iris-note Tell me the Iris answer." }],
+    expect: { turns: 1, saw: ["request:skill-note"] },
+  },
+  {
+    id: "claude-plugin",
+    harness: "claude",
+    about: "A skill from a plugin (--plugin-dir), named plugin:skill",
+    plugin: true,
+    slashCommands: true,
+    allowedTools: [...READ_ONLY, "Skill"],
+    steps: [{ prompt: "Use the plugin-note skill from the iris-plugin plugin to tell me the Iris plugin answer." }],
+    expect: { turns: 1, saw: ["tool:Skill", "request:plugin-note"] },
+  },
+  {
+    id: "codex-plugin",
+    harness: "codex",
+    about: "A skill from a plugin installed from a local marketplace",
+    plugin: true,
+    steps: [{ prompt: "Use the plugin-note skill from the iris-plugin plugin to tell me the Iris plugin answer." }],
+    expect: { turns: 1, saw: ["request:plugin-note"] },
   },
   {
     id: "claude-web-search",

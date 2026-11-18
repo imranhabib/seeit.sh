@@ -39,6 +39,17 @@ describe("resetSandbox", () => {
     expect(JSON.parse(await readFile(join(dir, ".codex/hooks.json"), "utf8"))).toEqual(JSON.parse(await readFile(join(dir, ".claude/settings.json"), "utf8")));
   });
 
+  it("adds the Iris skill for both harnesses only when asked", async () => {
+    const dir = await tempDir();
+    await resetSandbox(dir);
+    expect(existsSync(join(dir, ".claude/skills/iris-note/SKILL.md"))).toBe(false);
+    await resetSandbox(dir, { skill: true });
+    const claude = await readFile(join(dir, ".claude/skills/iris-note/SKILL.md"), "utf8");
+    // Codex finds repository skills in .agents/skills (codex-rs/ext/skills/src/host_roots.rs).
+    expect(await readFile(join(dir, ".agents/skills/iris-note/SKILL.md"), "utf8")).toBe(claude);
+    expect(claude).toMatch(/^---\nname: iris-note\n/);
+  });
+
   it("refuses to clear a folder it did not create", async () => {
     const dir = await tempDir();
     await writeFile(join(dir, "important.txt"), "keep me");

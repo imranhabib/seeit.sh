@@ -59,9 +59,16 @@ tool_uses  PK (call_id, tool_use_id)
   `calls` (a view if convenient). Stored totals would have to follow every
   late call and recompute (ADR 0008).
 - **`tool_uses` stores labels, never content.** Tool inputs and results follow
-  body retention. Only these input fields are read, because they are labels:
-  Claude Code `Skill.skill` and `Agent.subagent_type`. Any other field must be
+  body retention. Only these inputs are read, for labels: Claude Code
+  `Skill.skill` and `Agent.subagent_type`, and the tool names called from
+  Codex `exec` code (`tools.<name>(`; see below). Any other field must be
   added to this list on purpose.
+- **Codex calls most tools from code.** Since 0.169 (code mode) the model
+  writes JavaScript for the `exec` tool, and that code calls the real tools:
+  `await tools.exec_command({...})`, `await tools.mcp__iris__echo({...})`.
+  At the response level these are all one `exec` call. The ledger reads the
+  tool names from the code, one `tool_uses` row per `tools.<name>(` call
+  (seen live 2026-11-18, Iris `codex-mcp`).
 - **Plugins are a column, not a table.** A plugin is not an event; it supplies
   skills, MCP servers, and agents, and is read from their names.
 - **Compaction is a property of a call.** The compaction request is one call,
@@ -72,12 +79,12 @@ tool_uses  PK (call_id, tool_use_id)
 
 | Fact | Claude Code | Codex |
 | --- | --- | --- |
-| Built-in tool | `tool_use` block `name` (`Bash`, `Edit`, ...) | `function_call` / `custom_tool_call` `name` in namespace `functions` (`exec`, `wait`, ...). Since 0.169 the tool list is an `additional_tools` input item made of namespaces. |
-| MCP tool | Name `mcp__<server>__<tool>` | Its own namespace, named after the server. It can carry the `mcp__` prefix and a hash suffix (`codex-mcp/src/tools.rs`). Not yet seen live. |
-| Skill | A `Skill` tool call, input `skill` | No tool call. Explicit use (`$skill` in the prompt) injects the skill file into the request; implicit use is the model reading a `SKILL.md` with `exec` (`core/src/skills.rs`). Not yet seen live. |
+| Built-in tool | `tool_use` block `name` (`Bash`, `Edit`, ...) | `custom_tool_call` `exec`, whose code calls `tools.exec_command(...)` and other tools; `function_call` with a `namespace` for the rest (`collaboration/spawn_agent`). The tool list is an `additional_tools` input item made of namespaces. |
+| MCP tool | Name `mcp__<server>__<tool>` | Same name, called from `exec` code: `tools.mcp__<server>__<tool>(...)` (seen live) |
+| Skill | A `Skill` tool call, input `skill` | No tool call. Explicit use (`$skill` in the prompt) injects the skill file into the request (seen live); implicit use is the model reading a `SKILL.md` with `exec_command` (`core/src/skills.rs`). |
 | Subagent | An `Agent` tool call, input `subagent_type`; the subagent's calls carry `x-claude-code-agent-id` (and `x-claude-code-agent-type` with hint headers) | A `spawn_agent` call in namespace `collaboration`; the subagent's calls carry their own `turn_id`, and `root_turn_id` names the user's turn |
 | Server tool | `server_tool_use` blocks and `usage.server_tool_use` | `web_search_call` output items |
-| Plugin | `plugin:skill` skill names; `mcp__plugin_<plugin>_<server>__…` tool names | Codex tracks a skill's `plugin_id` internally; whether it reaches the request is not yet known |
+| Plugin | `plugin:skill` skill names; `mcp__plugin_<plugin>_<server>__…` tool names | A plugin's skill is read from `$CODEX_HOME/plugins/cache/<marketplace>/<plugin>/<version>/skills/` (seen live), so the path names the plugin; no plugin field in the request |
 | Tool duration | `x-claude-code-prev-tool-durations` (hint headers) | None known |
 | Tool result size | `tool_result` in the next request | `function_call_output` / `custom_tool_call_output` in the next request |
 | Compaction, manual | `x-claude-code-compaction: manual` (hint headers) | `x-codex-turn-metadata`: `request_kind: "compaction"`, `compaction.trigger: "manual"` |
@@ -110,10 +117,19 @@ tool_uses  PK (call_id, tool_use_id)
 
 ### Verification gaps (Iris, both harnesses)
 
-Iris has a manual compaction scenario only for Claude Code and an automatic
-one only for Codex. Before this model is trusted, add:
+Iris scenarios cover each source for both harnesses: manual and automatic
+compaction (`claude-compaction`, `codex-manual-compaction`,
+`codex-compaction`), an MCP tool (`claude-mcp`,
+`codex-mcp`), a skill (`claude-skill`, `codex-skill`), and a plugin
+(`claude-plugin`, `codex-plugin`), with Iris's own MCP server, skill, and
+plugins (`apps/iris/fixtures`). Claude Code runs with
+`CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`. Codex manual compaction runs through
+`codex app-server` (`thread/compact/start`), because `codex exec` has no
+`/compact`.
 
-- Claude Code automatic compaction, and Codex manual compaction.
-- Claude Code runs with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`.
-- An MCP tool, a skill, and a plugin, for each harness, with a sandbox MCP
-  server and skill (the user's own are kept out, see `apps/iris`).
+One gap remains: Claude Code automatic compaction (`x-claude-code-compaction:
+auto`) is documented but not seen live. Claude Code 2.1.326 in `-p` mode did
+not compact at 41,000 tokens with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000` and
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=30`, in separate steps or in one tool loop
+(2026-11-18), nor at 96,000 tokens with `autoCompactWindow: 100000`. Reaching
+the default window costs too much quota for a routine scenario.
