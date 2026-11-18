@@ -17,7 +17,7 @@ export const calls = sqliteTable(
     turnId: text("turn_id"),
     /** Subagent ID (Claude Code: x-claude-code-agent-id; Codex: the spawned agent's thread_id); null for the main agent. Subagent calls share the user's turn. */
     agentId: text("agent_id"),
-    kind: text("kind").notNull(), // "turn" | "background" | "connectivity" (CallKind in packages/core/src/request.ts)
+    kind: text("kind").notNull(), // "turn" | "background" | "connectivity" (CallKind in packages/core/src/provider/model.ts)
     method: text("method").notNull(),
     path: text("path").notNull(),
     httpStatus: integer("http_status"), // null if upstream never answered
@@ -57,9 +57,9 @@ export const calls = sqliteTable(
     // before these checks existed; "[]" / "{}" means checked, nothing found.
     /** Broken invariants, for example ["complete_without_usage"]. See src/flags.ts. */
     flags: text("flags"),
-    /** Event types not in packages/core/src/known.ts, with counts: {"type": n}. */
+    /** Event types not in the known lists (packages/core/src/provider/<provider>/model.ts), with counts: {"type": n}. */
     unknownEvents: text("unknown_events"),
-    /** Top-level usage fields not in packages/core/src/known.ts: ["field"]. */
+    /** Top-level usage fields not in the known lists (packages/core/src/provider/<provider>/model.ts): ["field"]. */
     unknownUsageFields: text("unknown_usage_fields"),
   },
   (t) => [index("calls_started_at").on(t.startedAt), index("calls_session").on(t.sessionId, t.startedAt)],

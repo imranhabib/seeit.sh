@@ -36,7 +36,7 @@ export const calls = pgTable(
     turnId: text("turn_id"),
     /** Subagent ID (Claude Code: x-claude-code-agent-id; Codex: the spawned agent's thread_id); null for the main agent. Subagent calls share the user's turn. */
     agentId: text("agent_id"),
-    kind: text("kind").notNull(), // "turn" | "background" | "connectivity" (CallKind in packages/core/src/request.ts)
+    kind: text("kind").notNull(), // "turn" | "background" | "connectivity" (CallKind in packages/core/src/provider/model.ts)
     method: text("method").notNull(),
     path: text("path").notNull(),
     httpStatus: integer("http_status"), // null if upstream never answered
@@ -79,9 +79,9 @@ export const calls = pgTable(
     // array/object means checked with no drift.
     /** Broken invariants, for example ["complete_without_usage"]. */
     flags: jsonb("flags").$type<string[]>(),
-    /** Event types not in packages/core/src/known.ts, with counts: {"type": n}. */
+    /** Event types not in the known lists (packages/core/src/provider/<provider>/model.ts), with counts: {"type": n}. */
     unknownEvents: jsonb("unknown_events").$type<Record<string, number>>(),
-    /** Top-level usage fields not in packages/core/src/known.ts: ["field"]. */
+    /** Top-level usage fields not in the known lists (packages/core/src/provider/<provider>/model.ts): ["field"]. */
     unknownUsageFields: jsonb("unknown_usage_fields").$type<string[]>(),
   },
   (t) => [index("calls_started_at").on(t.startedAt), index("calls_session").on(t.sessionId, t.startedAt)],

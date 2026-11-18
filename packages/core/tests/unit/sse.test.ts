@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSseParser, type SseEvent } from "./sse.ts";
+import { createSseParser, type SseEvent } from "../../src/sse.ts";
 
 const STREAM =
   'event: message_start\ndata: {"type":"message_start"}\n\n' +

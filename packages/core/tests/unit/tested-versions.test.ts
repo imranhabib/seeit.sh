@@ -1,12 +1,12 @@
 import { readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { FIXTURE_FOR_VERSION, hasFixture } from "./tested-versions.ts";
+import { FIXTURE_FOR_VERSION, hasFixture } from "../../src/tested-versions.ts";
 
 describe("tested harness versions", () => {
   // Keeps the list honest: adding or removing a fixture file without
   // updating FIXTURE_FOR_VERSION fails here.
   it("lists exactly the fixture files in packages/core/fixtures", () => {
-    const files = readdirSync(new URL("../fixtures/", import.meta.url)).filter((f) => f.endsWith(".sse"));
+    const files = readdirSync(new URL("../../fixtures/", import.meta.url)).filter((f) => f.endsWith(".sse"));
     expect(Object.values(FIXTURE_FOR_VERSION).sort()).toEqual(files.sort());
   });
 
