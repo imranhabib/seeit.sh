@@ -3,7 +3,7 @@ import type { IrisConfig } from "../src/config.ts";
 import { claudeCommand, codexAppServerCommand, codexCommand, codexPluginCommands } from "../src/drivers/headless.ts";
 import type { Scenario } from "../src/scenarios.ts";
 
-const config: IrisConfig = { repo: "/r", sandbox: "/i/sandbox", claudeConfigDir: "/i/claude-config", codexHome: "/i/codex-home", codexUserHome: "/i/codex-user-home", runsDir: "/r/data/iris", fixtures: "/r/apps/iris/fixtures" };
+const config: IrisConfig = { repo: "/r", sandbox: "/i/sandbox", claudeConfigDir: "/i/claude-config", codexHome: "/i/codex-home", codexUserHome: "/i/codex-user-home", runsDir: "/r/data/iris", fixtures: "/r/apps/iris/fixtures", databaseUrl: "postgresql://127.0.0.1:5432/seeit_iris" };
 const shellEnv = { PATH: "/bin", ANTHROPIC_API_KEY: "sk-test", OPENAI_API_KEY: "sk-test" };
 const scenario = (extra: Partial<Scenario> = {}): Scenario => ({ id: "x", harness: "claude", about: "", steps: [], expect: {}, ...extra });
 

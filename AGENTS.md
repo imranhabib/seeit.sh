@@ -36,19 +36,19 @@ pnpm test             # run all tests (Vitest)
 pnpm typecheck        # tsc --noEmit for all packages
 pnpm dev              # run the gateway on 127.0.0.1:8787
 pnpm iris run         # record the Iris scenarios (uses real harness logins; see apps/iris/src/config.ts)
-pnpm --filter @seeit/gateway db:generate   # new SQL migration after a schema change
-pnpm --filter @seeit/ledger db:generate    # same, for the PostgreSQL ledger
+pnpm --filter @seeit/ledger db:generate    # new SQL migration after a schema change
 pnpm --filter @seeit/ledger test:db        # PostgreSQL tests; needs SEEIT_TEST_DATABASE_URL
 ```
 
 Run `pnpm typecheck` and `pnpm test` before you say a change is done.
 
-There are two ledger schemas until the cutover in ADR 0007. The gateway still
-records to SQLite with `apps/gateway/src/db/schema.ts`. The new ledger service
-uses PostgreSQL with `apps/ledger/src/db/schema.ts`; see
-[apps/ledger/README.md](apps/ledger/README.md). After changing a schema, run
-that package's `db:generate` and commit the new file in its `drizzle/`
-directory. Never edit a migration that is already committed; add a new one.
+The gateway has no database. It sends every call to the ledger service
+(ADR 0007), which analyzes it (`analyzeCall` in `@seeit/core`) and stores it
+in PostgreSQL with `apps/ledger/src/db/schema.ts`; see
+[apps/ledger/README.md](apps/ledger/README.md). After changing the schema, run
+`db:generate` and commit the new file in `apps/ledger/drizzle/`. Never edit a
+migration that is already committed; add a new one. Iris and the PostgreSQL
+tests need a local PostgreSQL server.
 
 ## Hot path rules (do not break these)
 

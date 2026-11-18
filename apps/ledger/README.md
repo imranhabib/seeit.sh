@@ -2,9 +2,8 @@
 
 This package starts a separate ledger process, opens PostgreSQL asynchronously,
 and applies its own generated migrations. It exposes `GET /health` for database
-readiness and `POST /ingest/calls` for recordings (see below). The read API is
-a later PR. The gateway still records to SQLite and does not call this
-service yet (ADR 0007, Phase 1C).
+readiness and `POST /ingest/calls`, where the gateway sends every call (see
+below). The read API is a later PR (ADR 0007, Phase 1C).
 
 ## Native local setup
 
@@ -92,29 +91,28 @@ pnpm --filter @seeit/ledger db:generate
 ```
 
 Commit the generated SQL and metadata in this package's `drizzle/` directory.
-Never edit a migration after it is committed. Migrations run at ledger startup;
-the current gateway's SQLite migrations remain separate and untouched. This
-foundation uses one ledger process; coordinate migrations before adding
-multiple startup replicas.
+Never edit a migration after it is committed. Migrations run at ledger startup.
+This uses one ledger process; coordinate migrations before adding multiple
+startup replicas.
 
-All current call/body fields are preserved, with these PostgreSQL mappings:
+The columns are `CallFields` from `@seeit/core`, with these PostgreSQL
+mappings:
 
-- Timestamps are `timestamptz(3)` and become JavaScript `Date` values. Future
-  HTTP ingestion converts ISO strings; read responses will serialize dates.
+- Timestamps are `timestamptz(3)` and become JavaScript `Date` values.
+  Ingestion converts the gateway's ISO strings.
 - Token and character counters use `bigint` in JavaScript-number mode to avoid
-  PostgreSQL's 32-bit integer limit. Callers must use safe integers; ingestion
-  validation belongs to the next PR.
-- Timings and fractional rollout units use `double precision`, matching
-  SQLite's numeric precision rather than PostgreSQL's 32-bit `real`.
+  PostgreSQL's 32-bit integer limit.
+- Timings and fractional rollout units use `double precision`, not
+  PostgreSQL's 32-bit `real`.
 - Quota, server-tool counts, and drift information use structured `jsonb`.
-  Ingestion must parse the gateway's existing serialized JSON, not store those
-  strings as JSON strings. SQL null means missing/unchecked; `[]` and `{}` mean
-  checked and empty.
+  SQL null means missing/unchecked; `[]` and `{}` mean checked and empty.
 - Gzipped bodies use `bytea`/`Buffer`. Body rows reference calls with cascading
-  deletion. This PR establishes storage; retention jobs come later.
+  deletion. Bodies older than 14 days are deleted at startup and every 6 hours
+  (`src/db/retention.ts`); call rows are kept.
 
-No SQLite history is imported by starting this service. Existing recordings
-remain at their current paths until the separate cutover PR.
+The ledger started empty: calls the gateway recorded to its old SQLite file
+(`data/seeit.db`) were not imported (decided 2026-11-18). That file is no
+longer read or written.
 
 ## Tests and persistence check
 

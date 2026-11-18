@@ -19,6 +19,7 @@ import { and, eq, isNotNull } from "drizzle-orm";
 import type { Context } from "hono";
 import type { LedgerDatabase } from "./db/database.ts";
 import { bodies, calls } from "./db/schema.ts";
+import { logCall } from "./log.ts";
 
 const gzipAsync = promisify(gzip);
 
@@ -69,11 +70,13 @@ export function createIngest(database: LedgerDatabase, writeToken: string) {
           .values({ ...fields, startedAt, flags })
           .onConflictDoNothing({ target: calls.id })
           .returning({ id: calls.id });
-        if (inserted.length === 0) return false; // already stored: a retry
+        if (inserted.length === 0) return null; // already stored: a retry
         await tx.insert(bodies).values({ callId: call.id, createdAt: startedAt, requestGz, responseGz });
-        return true;
+        return flags;
       });
-      return stored ? c.json({ status: "stored" }, 201) : c.json({ status: "duplicate" }, 200);
+      if (!stored) return c.json({ status: "duplicate" }, 200);
+      logCall({ ...fields, flags: stored });
+      return c.json({ status: "stored" }, 201);
     } catch {
       console.error(`[ledger] storing call ${call.id} failed`);
       return c.json({ error: "storage unavailable" }, 503);

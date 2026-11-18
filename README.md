@@ -33,8 +33,9 @@ The full plan is in [docs/PLAN.md](docs/PLAN.md), and the key decisions are in
 
 The next milestone separates the gateway from storage and dashboard work.
 Gateway, ledger, and dashboard stay in this monorepo, with gateway and ledger
-running as separate services. This is the agreed direction; the current code
-still records to local SQLite, and the quick start below runs that version.
+running as separate services. The gateway and ledger parts are built: the
+gateway sends every call to the ledger service, which stores it in PostgreSQL.
+The dashboard is next.
 
 ```text
 Claude Code / Codex ──▶ Gateway ──▶ Model provider
@@ -82,17 +83,27 @@ See [ADR 0007](docs/adr/0007-ledger-service-and-postgres.md) for the decision an
 for the small PRs that implement it. Each PR includes a testing and code
 walkthrough before the next slice starts. Native PostgreSQL and ledger startup
 are documented in [apps/ledger/README.md](apps/ledger/README.md).
-Ingestion, read APIs, and Docker startup remain planned.
+Read APIs and Docker startup remain planned.
 
 ## Quick start
 
-Requires Node 24+ and pnpm.
+Requires Node 24+, pnpm, and PostgreSQL (see
+[apps/ledger/README.md](apps/ledger/README.md) for native setup).
 
 ```bash
 pnpm install
 pnpm test
-pnpm dev        # gateway on http://127.0.0.1:8787
+
+# The ledger service stores calls; the gateway sends them with this token.
+export SEEIT_LEDGER_WRITE_TOKEN="$(openssl rand -hex 32)"
+SEEIT_LEDGER_DATABASE_URL=postgresql://127.0.0.1:5432/seeit_ledger pnpm --filter @seeit/ledger start   # http://127.0.0.1:8788
+
+# In another terminal, with the same SEEIT_LEDGER_WRITE_TOKEN:
+SEEIT_LEDGER_URL=http://127.0.0.1:8788 pnpm dev   # gateway on http://127.0.0.1:8787
 ```
+
+Without `SEEIT_LEDGER_URL` and `SEEIT_LEDGER_WRITE_TOKEN` the gateway still
+forwards traffic, but records nothing.
 
 Send a harness through it (in another terminal):
 
@@ -102,14 +113,17 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787/claude claude
 
 For Codex, see [docs/phase-0-recorder.md](docs/phase-0-recorder.md).
 
-Every call becomes one row in the SQLite ledger at `data/seeit.db`, with
-tokens, timings, turn, and completion status. Request and response bodies are
-stored gzipped for 14 days. The gateway also prints one line per call. For
-example, recent calls:
+Every call becomes one row in the ledger's PostgreSQL database, with tokens,
+timings, turn, completion status, and plan-quota headers. Request and response
+bodies are stored gzipped for 14 days. The ledger prints one line per stored
+call. For example, recent calls:
 
 ```bash
-sqlite3 -header -column data/seeit.db "select started_at, harness, kind, completion, model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens from calls order by started_at desc limit 20"
+psql -h 127.0.0.1 seeit_ledger -c "select started_at, harness, kind, completion, model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens from calls order by started_at desc limit 20"
 ```
+
+Calls recorded before the PostgreSQL ledger (the SQLite file `data/seeit.db`)
+are not imported; that file is no longer read or written.
 
 Raw JSON recordings of each call are also written to `data/recordings/`
 (git-ignored).
@@ -118,7 +132,7 @@ Raw JSON recordings of each call are also written to `data/recordings/`
 
 ```
 apps/gateway     Hono proxy server (TypeScript, Node 24)
-apps/ledger      PostgreSQL storage foundation and readiness endpoint
+apps/ledger      ledger service: recording ingestion, analysis, PostgreSQL storage
 apps/dashboard   planned: Vite + React dashboard
 packages/core    shared parsers and helpers
 docs/            plan, ADRs, phase notes

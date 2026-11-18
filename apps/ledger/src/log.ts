@@ -1,8 +1,8 @@
-// One console line per call, plus a warning line when something drifted.
+// One console line per stored call, plus a warning line when something drifted.
 
-import type { CallRow } from "./db/schema.ts";
+import type { CallFields } from "@seeit/core";
 
-export function logCall(r: CallRow) {
+export function logCall(r: Omit<CallFields, "flags"> & { flags: string[] }) {
   const tokens =
     r.inputTokens === null
       ? ""
@@ -10,9 +10,9 @@ export function logCall(r: CallRow) {
   console.log(`[${r.harness}] ${r.method} ${r.path} -> ${r.httpStatus ?? "-"} ${r.completion} ${r.kind}${tokens} (${Math.round(r.timeToStreamEndMs ?? 0)} ms)`);
   // Drift is rare and worth noticing, so it gets its own line.
   const drift = [
-    r.flags && r.flags !== "[]" ? `flags=${r.flags}` : "",
-    r.unknownEvents && r.unknownEvents !== "{}" ? `unknown_events=${r.unknownEvents}` : "",
-    r.unknownUsageFields && r.unknownUsageFields !== "[]" ? `unknown_usage_fields=${r.unknownUsageFields}` : "",
+    r.flags.length ? `flags=${JSON.stringify(r.flags)}` : "",
+    r.unknownEvents && Object.keys(r.unknownEvents).length ? `unknown_events=${JSON.stringify(r.unknownEvents)}` : "",
+    r.unknownUsageFields?.length ? `unknown_usage_fields=${JSON.stringify(r.unknownUsageFields)}` : "",
   ].filter(Boolean);
   if (drift.length) console.warn(`[${r.harness}] drift (${r.harnessVersion ?? "unknown version"}): ${drift.join(" ")}`);
 }

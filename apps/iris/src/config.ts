@@ -30,6 +30,8 @@ export type IrisConfig = {
   runsDir: string;
   /** The MCP server and plugins Iris installs for its scenarios (apps/iris/fixtures). */
   fixtures: string;
+  /** Iris's own PostgreSQL database for the ledger it starts (created if missing). */
+  databaseUrl: string;
 };
 
 export function loadIrisConfig(env: NodeJS.ProcessEnv = process.env): IrisConfig {
@@ -42,5 +44,6 @@ export function loadIrisConfig(env: NodeJS.ProcessEnv = process.env): IrisConfig
     codexUserHome: join(home, "codex-user-home"),
     runsDir: join(REPO, "data", "iris"),
     fixtures: join(REPO, "apps", "iris", "fixtures"),
+    databaseUrl: env.IRIS_DATABASE_URL ?? "postgresql://127.0.0.1:5432/seeit_iris",
   };
 }

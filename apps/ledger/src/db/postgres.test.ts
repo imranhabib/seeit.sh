@@ -14,7 +14,7 @@ import { bodies, calls, type CallRow } from "./schema.ts";
 const testUrl = process.env.SEEIT_TEST_DATABASE_URL;
 
 // No shared tables are cleared: each suite creates and drops its own database.
-// The configured test role needs CREATEDB; the gateway's SQLite file is unused.
+// The configured test role needs CREATEDB.
 describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
   const name = `seeit_test_${randomUUID().replaceAll("-", "")}`;
   let admin: Pool;

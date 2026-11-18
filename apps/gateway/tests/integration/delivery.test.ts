@@ -10,7 +10,6 @@ import { serve } from "@hono/node-server";
 import type { RecordedCall } from "@seeit/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../../src/app.ts";
-import { openLedger, type Ledger } from "../../src/db/ledger.ts";
 import { DEFAULT_DELIVERY, createDelivery, type Delivery } from "../../src/delivery.ts";
 
 const EVENT_GAP_MS = 100;
@@ -51,7 +50,6 @@ const ledgerService: Server = createServer((req, res) => {
 
 let gateway: ReturnType<typeof serve>;
 let gatewayUrl = "";
-let ledger: Ledger;
 let delivery: Delivery;
 
 beforeAll(async () => {
@@ -59,10 +57,9 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => ledgerService.listen(0, "127.0.0.1", resolve));
   const fake = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
   const ledgerUrl = `http://127.0.0.1:${(ledgerService.address() as AddressInfo).port}`;
-  ledger = openLedger(":memory:");
   delivery = createDelivery({ ...DEFAULT_DELIVERY, url: ledgerUrl, token: "write-token", timeoutMs: 300, maxAttempts: 1 }, { log: () => {} });
   const recordDir = await mkdtemp(join(tmpdir(), "seeit-test-"));
-  const app = createApp({ host: "127.0.0.1", port: 0, recordDir, dbPath: ":memory:", upstreams: { claude: fake, codex: fake } }, ledger, {}, delivery);
+  const app = createApp({ host: "127.0.0.1", port: 0, recordDir, upstreams: { claude: fake, codex: fake } }, {}, delivery);
   await new Promise<void>((resolve) => {
     gateway = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, (info) => {
       gatewayUrl = `http://127.0.0.1:${info.port}`;
@@ -77,7 +74,6 @@ afterAll(() => {
     server.closeAllConnections();
     server.close();
   }
-  ledger?.close();
 });
 
 const turn = () =>

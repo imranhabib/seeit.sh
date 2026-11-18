@@ -9,6 +9,7 @@
 // Iris never commits anything.
 
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -21,6 +22,8 @@ import { loadIrisConfig, type IrisConfig } from "./config.ts";
 import { runAppServerSteps } from "./drivers/app-server.ts";
 import { claudeCommand, codexAppServerCommand, codexCommand, codexPluginCommands, startCommand, type Command, type RunningCommand } from "./drivers/headless.ts";
 import { startGateway, type RunningGateway } from "./gateway.ts";
+import { ensureDatabase, startLedger } from "./ledger.ts";
+import { Pool } from "pg";
 import { waitForCalls, type CallRecord } from "./results.ts";
 import { resetSandbox } from "./sandbox.ts";
 import { SCENARIOS, type Scenario } from "./scenarios.ts";
@@ -90,19 +93,25 @@ async function main() {
   // every Codex request, so remove it first.
   if (scenarios.some((s) => s.harness === "codex")) await runQuietly(codexPluginCommands(config, process.env).remove, config.sandbox, join(runDir, "logs", "plugin-cleanup.log"));
 
+  await ensureDatabase(config.databaseUrl);
+  const writeToken = randomBytes(32).toString("hex"); // per run; never stored
+  const ledger = await startLedger({ repo: config.repo, databaseUrl: config.databaseUrl, writeToken, logFile: join(runDir, "logs", "ledger.log") });
+  const db = new Pool({ connectionString: config.databaseUrl, max: 2 });
   const proxy = await startChaosProxy(PROVIDERS, NEEDLES);
   const gateway = await startGateway({
     repo: config.repo,
     dataDir: runDir,
     upstreams: { claude: `${proxy.url}/claude`, codex: `${proxy.url}/codex` },
+    ledger: { url: ledger.url, writeToken },
     logFile: join(runDir, "logs", "gateway.log"),
   });
+  console.log(`iris: ledger database ${new URL(config.databaseUrl).pathname.slice(1)}`);
 
   const results: ScenarioResult[] = [];
   const calls: CallRecord[] = [];
   try {
     for (const scenario of scenarios) {
-      const { result, rows } = await runScenario(scenario, config, gateway, proxy, runDir);
+      const { result, rows } = await runScenario(scenario, config, gateway, proxy, db, runDir);
       results.push(result);
       calls.push(...rows);
       printSummary(result, rows);
@@ -110,6 +119,8 @@ async function main() {
   } finally {
     await gateway.stop();
     await proxy.close();
+    await ledger.stop();
+    await db.end();
     await writeFile(join(runDir, "manifest.json"), JSON.stringify({ versions, scenarios: results }, null, 2) + "\n");
     await writeFile(join(runDir, "calls.json"), JSON.stringify(calls, null, 2) + "\n");
   }
@@ -126,6 +137,7 @@ async function runScenario(
   config: IrisConfig,
   gateway: RunningGateway,
   proxy: ChaosProxy,
+  db: Pool,
   runDir: string,
 ): Promise<{ result: ScenarioResult; rows: CallRecord[] }> {
   const result: ScenarioResult = {
@@ -183,8 +195,9 @@ async function runScenario(
     if (plugin) await runQuietly(plugin.remove, config.sandbox, pluginLog);
   }
 
-  // The gateway writes each row in the background after its response ends.
-  const rows = await waitForCalls(gateway.dbPath, result.startedAt, started);
+  // The gateway sends each call in the background after its response ends;
+  // the ledger stores it.
+  const rows = await waitForCalls(db, result.startedAt, started);
   stopListening();
   result.endedAt = new Date().toISOString();
   result.callIds = rows.map((r) => r.id);

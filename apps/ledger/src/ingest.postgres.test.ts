@@ -10,6 +10,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "./app.ts";
 import { openDatabase, type LedgerDatabase } from "./db/database.ts";
+import { pruneBodies } from "./db/retention.ts";
 import { bodies, calls } from "./db/schema.ts";
 
 const testUrl = process.env.SEEIT_TEST_DATABASE_URL;
@@ -159,5 +160,14 @@ describe.skipIf(!testUrl)("PostgreSQL recording ingestion", () => {
     await Promise.all(Array.from({ length: 10 }, (_, i) => post(claudeCall(`same-${i}`, "claude-cli/8.8.8"))));
     const rows = await database.db.select({ flags: calls.flags }).from(calls).where(eq(calls.harnessVersion, "claude-cli/8.8.8"));
     expect(rows.filter((r) => r.flags?.includes("untested_harness_version"))).toHaveLength(1);
+  });
+
+  it("prunes bodies after the retention period and keeps the call rows", async () => {
+    await post({ ...claudeCall("old"), startedAt: "2026-10-01T00:00:00.000Z" });
+    await post({ ...claudeCall("recent"), startedAt: "2026-11-17T00:00:00.000Z" });
+    await pruneBodies(database, new Date("2026-11-18T00:00:00.000Z"));
+    expect(await database.db.select().from(bodies).where(eq(bodies.callId, "old"))).toHaveLength(0);
+    expect(await database.db.select().from(bodies).where(eq(bodies.callId, "recent"))).toHaveLength(1);
+    expect(await database.db.select().from(calls).where(eq(calls.id, "old"))).toHaveLength(1);
   });
 });

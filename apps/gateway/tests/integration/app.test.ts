@@ -3,13 +3,11 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { gzipSync } from "node:zlib";
 import { serve } from "@hono/node-server";
-import { eq } from "drizzle-orm";
+import { analyzeCall, type CallFields, type RecordedCall } from "@seeit/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../../src/app.ts";
-import { openLedger, type Ledger } from "../../src/db/ledger.ts";
-import { bodies, type CallRow } from "../../src/db/schema.ts";
 import type { Recording } from "../../src/recorder.ts";
 
 const EVENT_GAP_MS = 100;
@@ -67,15 +65,17 @@ const upstream: Server = createServer((req, res) => {
 // --- gateway -----------------------------------------------------------------
 let gatewayUrl = "";
 let gateway: ReturnType<typeof serve>;
-let ledger: Ledger;
-// Rows are written in the background, possibly after the test that caused them
-// has finished, so each waiter matches on method and path.
-let callWaiters: { method: string; path: string; resolve: (row: CallRow) => void }[] = [];
-const nextCall = (method: string, path: string) => new Promise<CallRow>((resolve) => callWaiters.push({ method, path, resolve }));
-const onCall = (row: CallRow) => {
-  const waiter = callWaiters.find((w) => w.method === row.method && w.path === row.path);
+// What the ledger service would receive, with the fields its analysis
+// (analyzeCall, the same code the ledger runs) makes of it.
+type Seen = CallFields & { recorded: RecordedCall };
+// Calls are recorded in the background, possibly after the test that caused
+// them has finished, so each waiter matches on method and path.
+let callWaiters: { method: string; path: string; resolve: (seen: Seen) => void }[] = [];
+const nextCall = (method: string, path: string) => new Promise<Seen>((resolve) => callWaiters.push({ method, path, resolve }));
+const onRecordedCall = (recorded: RecordedCall) => {
+  const waiter = callWaiters.find((w) => w.method === recorded.method && w.path === recorded.path);
   callWaiters = callWaiters.filter((w) => w !== waiter);
-  waiter?.resolve(row);
+  waiter?.resolve({ ...analyzeCall(recorded).fields, recorded });
 };
 const recordedWaiters: ((file: string) => void)[] = [];
 const nextRecording = () => new Promise<string>((resolve) => recordedWaiters.push(resolve));
@@ -84,9 +84,8 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
   const fake = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
   const recordDir = await mkdtemp(join(tmpdir(), "seeit-test-"));
-  ledger = openLedger(":memory:");
-  const app = createApp({ host: "127.0.0.1", port: 0, recordDir, dbPath: ":memory:", upstreams: { claude: fake, codex: fake } }, ledger, {
-    onCall,
+  const app = createApp({ host: "127.0.0.1", port: 0, recordDir, upstreams: { claude: fake, codex: fake } }, {
+    onRecordedCall,
     onRecorded: (file) => recordedWaiters.shift()?.(file),
   });
   await new Promise<void>((resolve) => {
@@ -101,7 +100,6 @@ afterAll(() => {
   gateway?.close();
   upstream.closeAllConnections();
   upstream.close();
-  ledger?.close();
 });
 
 const claudeTurn = { model: "claude-test", tools: [{ name: "Read" }], messages: [{ role: "user", content: "hi" }] };
@@ -157,7 +155,7 @@ describe("gateway proxy", () => {
   });
 });
 
-describe("ledger", () => {
+describe("recorded calls", () => {
   it("records a complete Claude turn with usage, timings, quota, and bodies", async () => {
     const call = nextCall("POST", "/v1/messages?beta=true");
     const recorded = nextRecording();
@@ -190,11 +188,11 @@ describe("ledger", () => {
     expect(row.turnId).toBeTruthy();
     // first text delta is the 2nd event, so it arrives after the first chunk
     expect(row.timeToFirstTokenMs!).toBeGreaterThan(row.timeToFirstChunkMs!);
-    expect(JSON.parse(row.quota!)).toEqual({ "anthropic-ratelimit-unified-5h-utilization": "0.25" });
+    expect(row.quota).toEqual({ "anthropic-ratelimit-unified-5h-utilization": "0.25" });
 
-    const [stored] = ledger.db.select().from(bodies).where(eq(bodies.callId, row.id)).all();
-    expect(JSON.parse(gunzipSync(stored!.requestGz!).toString())).toEqual(claudeTurn);
-    expect(gunzipSync(stored!.responseGz!).toString()).toContain("message_stop");
+    expect(JSON.parse(row.recorded.request.body!)).toEqual(claudeTurn);
+    expect(row.recorded.response.body).toContain("message_stop");
+    expect(row.recorded.request.headers.authorization).toMatch(/^\[redacted/);
 
     // Credentials never reach the recording.
     const rec: Recording = JSON.parse(await readFile(await recorded, "utf8"));
@@ -248,8 +246,9 @@ describe("ledger", () => {
     expect(await call).toMatchObject({ kind: "connectivity", completion: "complete", httpStatus: 404, harnessVersion: null, turnId: null });
   });
 
-  // ADR 0005, layer 3: flag the first call from a harness version with no fixtures.
-  it("flags only the first call from an untested harness version, and stores drift as JSON", async () => {
+  // The untested-version flag needs earlier rows, so the ledger adds it
+  // (apps/ledger/src/ingest.ts); the drift fields come from the analysis.
+  it("records no drift for a known stream format", async () => {
     const send = async () => {
       const call = nextCall("POST", "/v1/messages?v=untested");
       await (
@@ -262,11 +261,9 @@ describe("ledger", () => {
       return call;
     };
     const first = await send();
-    const second = await send();
-    expect(JSON.parse(first.flags!)).toEqual(["untested_harness_version"]);
-    expect(JSON.parse(second.flags!)).toEqual([]);
-    expect(JSON.parse(first.unknownEvents!)).toEqual({});
-    expect(JSON.parse(first.unknownUsageFields!)).toEqual([]);
+    expect(first.flags).toEqual([]);
+    expect(first.unknownEvents).toEqual({});
+    expect(first.unknownUsageFields).toEqual([]);
   });
 
   it("estimates usage for a cut stream", async () => {

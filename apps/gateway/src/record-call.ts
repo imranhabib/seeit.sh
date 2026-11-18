@@ -1,24 +1,20 @@
 // Everything that happens to a call after the response has started: read the
-// request, follow the turn, capture the response copy, analyze the call
-// (analyzeCall in @seeit/core), then write the ledger row, the log line and
-// the JSON recording. None of it is on the hot path: app.ts starts this
-// without awaiting it.
+// request, follow the turn, capture the response copy, then queue the
+// recorded call for the ledger service (ADR 0007), which analyzes and stores
+// it. Also the log line and the optional JSON recording. None of it is on
+// the hot path: app.ts starts this without awaiting it.
 
-import { analyzeCall, readRequest, type CallFields, type Harness, type RecordedCall } from "@seeit/core";
+import { readRequest, type Harness, type RecordedCall } from "@seeit/core";
 import { captureResponse } from "./capture.ts";
 import type { Config } from "./config.ts";
-import type { Ledger } from "./db/ledger.ts";
-import type { CallRow } from "./db/schema.ts";
 import type { Delivery } from "./delivery.ts";
-import { createVersionCheck } from "./flags.ts";
-import { logCall } from "./log.ts";
 import { decodeRequestText, parseResponseBody, writeRecording } from "./recorder.ts";
 import { redactHeaders } from "./redact.ts";
 import { createTurnTracker } from "./turns.ts";
 
 export type Hooks = {
-  /** Called after a call's ledger row is written. */
-  onCall?: (row: CallRow) => void;
+  /** Called with each recorded call, when it is queued for the ledger. */
+  onRecordedCall?: (call: RecordedCall) => void;
   /** Called after a JSON recording is written. */
   onRecorded?: (file: string) => void;
 };
@@ -44,10 +40,9 @@ export type ProxiedCall = {
   timeToResponseHeadersMs: number;
 };
 
-/** Returns the function that records one call. State (turns, versions seen) lives across calls. */
-export function createCallRecorder(config: Config, ledger: Ledger, hooks: Hooks = {}, delivery?: Delivery) {
+/** Returns the function that records one call. The turn tracker's state lives across calls. */
+export function createCallRecorder(config: Config, hooks: Hooks = {}, delivery?: Delivery) {
   const turns = createTurnTracker();
-  const isFirstUntested = createVersionCheck(ledger);
 
   return async function recordCall(call: ProxiedCall): Promise<void> {
     const { id, startedAt, start, harness, method, path, requestHeaders, requestBody, signal, upstream, responseStream, timeToResponseHeadersMs } = call;
@@ -83,26 +78,17 @@ export function createCallRecorder(config: Config, ledger: Ledger, hooks: Hooks 
       clientAborted: signal.aborted,
       readFailed: captured.readFailed,
     };
-    // To the ledger service, if configured (queued; never waited for).
+    // To the ledger service (queued; never waited for).
     delivery?.send(recorded);
-    const { fields, error } = analyzeCall(recorded);
-    if (error !== undefined) console.error(`[${harness}] analysis failed:`, error);
-
-    // The version check reads the ledger, so it runs before this row is written.
-    const flags: string[] = [...fields.flags];
-    if (isFirstUntested(fields.harnessVersion)) flags.push("untested_harness_version");
-    const row = sqliteRow({ ...fields, flags });
-
-    await ledger.record(row, { request: requestText, response: recorded.response.body });
-    logCall(row);
-    hooks.onCall?.(row);
+    hooks.onRecordedCall?.(recorded);
+    console.log(`[${harness}] ${method} ${path} -> ${recorded.response.status ?? "-"} (${Math.round(captured.timeToStreamEndMs)} ms)`);
 
     const file = await writeRecording(config.recordDir, {
       id,
       harness,
       startedAt,
       timings: { timeToResponseHeadersMs, timeToFirstChunkMs: captured.timeToFirstChunkMs, timeToStreamEndMs: captured.timeToStreamEndMs },
-      aborted: row.completion !== "complete",
+      aborted: recorded.clientAborted || recorded.readFailed || recorded.response.status === null,
       request: { method, path, headers: recorded.request.headers, body: parseJson(requestText) ?? requestText },
       response: {
         status: recorded.response.status ?? 0,
@@ -111,19 +97,6 @@ export function createCallRecorder(config: Config, ledger: Ledger, hooks: Hooks 
       },
     });
     hooks.onRecorded?.(file);
-  };
-}
-
-/** SQLite stores JSON columns as text (apps/gateway/src/db/schema.ts). */
-function sqliteRow(f: Omit<CallFields, "flags"> & { flags: string[] }): CallRow {
-  const json = (v: unknown) => (v === null ? null : JSON.stringify(v));
-  return {
-    ...f,
-    serverToolUse: json(f.serverToolUse),
-    quota: json(f.quota),
-    flags: JSON.stringify(f.flags),
-    unknownEvents: json(f.unknownEvents),
-    unknownUsageFields: json(f.unknownUsageFields),
   };
 }
 
