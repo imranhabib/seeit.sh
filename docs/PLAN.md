@@ -281,7 +281,7 @@ These rules are the performance-critical part of the system:
 
 A `seeit` command for running and inspecting the gateway from a terminal. It
 replaces the ad-hoc tools used so far: the `q()` sqlite3 helper,
-`pnpm summarize`, and calling `make-fixture.ts` by hand. The dashboard is for
+and calling `make-fixture.ts` by hand. The dashboard is for
 browsing and charts; the CLI is for quick answers and scripting.
 
 **Naming rule.** Commands follow the data model (Session → Turn → Call). A

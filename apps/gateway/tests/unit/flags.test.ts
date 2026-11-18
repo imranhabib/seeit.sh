@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { openLedger } from "./db/ledger.ts";
-import { callFlags, createVersionCheck } from "./flags.ts";
+import { openLedger } from "../../src/db/ledger.ts";
+import { callFlags, createVersionCheck } from "../../src/flags.ts";
 
 // A complete turn with full usage: no flags.
 const ok = {

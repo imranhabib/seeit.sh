@@ -35,7 +35,6 @@ pnpm install          # install dependencies
 pnpm test             # run all tests (Vitest)
 pnpm typecheck        # tsc --noEmit for all packages
 pnpm dev              # run the gateway on 127.0.0.1:8787
-pnpm summarize        # summarize recordings in data/recordings
 pnpm iris run         # record the Iris scenarios (uses real harness logins; see apps/iris/src/config.ts)
 pnpm --filter @seeit/gateway db:generate   # new SQL migration after a schema change
 pnpm --filter @seeit/ledger db:generate    # same, for the PostgreSQL ledger
@@ -86,11 +85,12 @@ critical:
 
 ## Testing
 
-- Vitest. In `packages/core`, tests live in `tests/unit/`, which mirrors
-  `src/` (for example `src/provider/anthropic/stream.ts` is tested by
-  `tests/unit/provider/anthropic/stream.test.ts`), so code and tests stay
-  apart. Other packages still keep `*.test.ts` next to the code until they
-  move to the same layout.
+- Vitest. In `packages/core` and `apps/gateway`, tests live in `tests/unit/`,
+  which mirrors `src/` (for example `src/provider/anthropic/stream.ts` is
+  tested by `tests/unit/provider/anthropic/stream.test.ts`), so code and tests
+  stay apart. Tests that start real servers go in `tests/integration/` (for
+  example the gateway's `tests/integration/app.test.ts`). Other packages still
+  keep `*.test.ts` next to the code until they move to the same layout.
 - Parser tests use recorded SSE fixtures. Feed them in small, odd-sized chunks
   so chunk-boundary bugs show up.
 - Parser coverage follows [ADR 0005](docs/adr/0005-parser-coverage-strategy.md):

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redactHeaders } from "./redact.ts";
+import { redactHeaders } from "../../src/redact.ts";
 
 describe("redactHeaders", () => {
   it("redacts credentials and account identifiers, keeping only their length", () => {

@@ -7,10 +7,10 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { serve } from "@hono/node-server";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createApp } from "./app.ts";
-import { openLedger, type Ledger } from "./db/ledger.ts";
-import { bodies, type CallRow } from "./db/schema.ts";
-import type { Recording } from "./recorder.ts";
+import { createApp } from "../../src/app.ts";
+import { openLedger, type Ledger } from "../../src/db/ledger.ts";
+import { bodies, type CallRow } from "../../src/db/schema.ts";
+import type { Recording } from "../../src/recorder.ts";
 
 const EVENT_GAP_MS = 100;
 

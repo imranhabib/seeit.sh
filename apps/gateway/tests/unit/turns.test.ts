@@ -1,6 +1,6 @@
 import type { RequestInfo } from "@seeit/core";
 import { describe, expect, it } from "vitest";
-import { createTurnTracker } from "./turns.ts";
+import { createTurnTracker } from "../../src/turns.ts";
 
 const call = (extra: Partial<RequestInfo> = {}): RequestInfo => ({
   harnessVersion: "claude-cli/2.1.326",

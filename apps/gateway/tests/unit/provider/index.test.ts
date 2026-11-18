@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { quotaHeaders } from "./observe.ts";
+import { quotaHeaders } from "../../../src/provider/index.ts";
 
 // Codex header names come from codex-rs/codex-api/src/rate_limits.rs at
 // openai/codex@9537934ed6d5a6658fc77032b3290650765466a1.
