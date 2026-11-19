@@ -1,9 +1,7 @@
 // The PostgreSQL ledger: one row per proxied call (ADR 0007). Bodies live in a
-// separate table so the calls table stays small and fast to query.
-//
-// This keeps all fields from the gateway's SQLite ledger
-// (apps/gateway/src/db/schema.ts). Ingestion will convert its ISO timestamps
-// and serialized JSON into Date and structured JSON values.
+// separate table so the calls table stays small and fast to query. The
+// columns are CallFields from @seeit/core (packages/core/src/call.ts);
+// ingestion converts the ISO start time into a Date.
 
 import {
   bigint,
@@ -45,7 +43,7 @@ export const calls = pgTable(
     model: text("model"),
 
     // Tokens. inputTokens is UNCACHED input; total input = input + cache read + cache write.
-    // Match SQLite's wider counters without narrowing them to PostgreSQL int4.
+    // bigint, not PostgreSQL int4, so large counters are never narrowed.
     // JavaScript-number values must remain within the safe integer range.
     inputTokens: bigint("input_tokens", { mode: "number" }),
     cacheReadTokens: bigint("cache_read_tokens", { mode: "number" }),

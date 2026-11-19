@@ -10,7 +10,6 @@ import type { Harness } from "@seeit/core";
 export type RunningGateway = {
   /** For example http://127.0.0.1:53990; a harness uses `${url}/${harness}`. */
   url: string;
-  dbPath: string;
   stop(): Promise<void>;
 };
 
@@ -18,16 +17,18 @@ export async function startGateway(options: {
   repo: string;
   dataDir: string;
   upstreams: Record<Harness, string>;
+  /** The ledger service the gateway sends its calls to. */
+  ledger: { url: string; writeToken: string };
   logFile: string;
 }): Promise<RunningGateway> {
   const gatewayDir = join(options.repo, "apps/gateway");
-  const dbPath = join(options.dataDir, "seeit.db");
   const child = spawn(join(gatewayDir, "node_modules/.bin/tsx"), ["src/index.ts"], {
     cwd: gatewayDir,
     env: {
       ...process.env,
       SEEIT_PORT: "0", // any free port; the gateway prints the one it got
-      SEEIT_DB: dbPath,
+      SEEIT_LEDGER_URL: options.ledger.url,
+      SEEIT_LEDGER_WRITE_TOKEN: options.ledger.writeToken,
       SEEIT_RECORD_DIR: join(options.dataDir, "recordings"),
       SEEIT_CLAUDE_UPSTREAM: options.upstreams.claude,
       SEEIT_CODEX_UPSTREAM: options.upstreams.codex,
@@ -59,7 +60,6 @@ export async function startGateway(options: {
 
   return {
     url,
-    dbPath,
     async stop() {
       child.kill("SIGTERM");
       await exited;

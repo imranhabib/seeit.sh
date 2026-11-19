@@ -7,7 +7,6 @@
   },
   "scripts": {
     "dev": "pnpm --filter @seeit/gateway dev",
-    "summarize": "pnpm --filter @seeit/gateway summarize",
     "test": "vitest run",
     "typecheck": "pnpm -r typecheck",
     "iris": "pnpm --filter @seeit/iris cli"

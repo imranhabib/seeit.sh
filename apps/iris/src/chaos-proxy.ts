@@ -34,8 +34,13 @@ export type Observed = {
    * Counts of what the call contained, for example "event:message_start",
    * "block:thinking", "delta:text_delta" (Anthropic), "item:web_search_call"
    * (OpenAI), "path:/alpha/search" (the request path, without its query),
-   * "request-kind:compaction" (Codex's request_kind from x-codex-turn-metadata),
-   * and "request:<name>" for each configured needle found in the request body.
+   * "request-kind:compaction" and "compaction-trigger:manual" (Codex's
+   * x-codex-turn-metadata), "hint:compaction:auto" (Claude Code's gateway
+   * hint headers, see HINT_HEADERS), "tool:Bash" or
+   * "tool:collaboration/spawn_agent" (a tool the response calls, with the
+   * Codex namespace), "exec-tool:mcp__iris__echo" (a tool Codex calls from
+   * code in its exec tool), and "request:<name>" for each configured needle
+   * found in the request body.
    */
   markers: Record<string, number>;
 };
@@ -64,10 +69,16 @@ export type ChaosProxy = {
 const SKIP_REQUEST = new Set(["host", "connection", "keep-alive", "transfer-encoding", "content-length", "accept-encoding"]);
 const SKIP_RESPONSE = new Set(["connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding"]);
 
+// Claude Code's gateway hint headers (CLAUDE_CODE_GATEWAY_HINT_HEADERS=1),
+// marked as "hint:<name>:<value>". The prompt ID is random, so only its
+// presence is marked ("hint:prompt-id").
+// https://code.claude.com/docs/en/llm-gateway-protocol#gateway-hint-headers
+const HINT_HEADERS = ["compaction", "context-compacted", "request-class", "agent-type"];
+
 export async function startChaosProxy(
   upstreams: Record<Harness, string>,
-  /** name -> text to look for in request bodies; found ones become "request:<name>" markers. */
-  needles: Record<string, string> = {},
+  /** name -> text (or pattern) to look for in request bodies; found ones become "request:<name>" markers. */
+  needles: Record<string, string | RegExp> = {},
 ): Promise<ChaosProxy> {
   const listeners = new Set<(e: ProxyEvent) => void>();
   const armed = new Map<Harness, TurnPlan>();
@@ -103,7 +114,15 @@ export async function startChaosProxy(
     mark(`path:${path.split("?")[0]}`);
     const turnMeta = parseJson(headers.get("x-codex-turn-metadata") ?? "");
     if (isObject(turnMeta) && typeof turnMeta.request_kind === "string") mark(`request-kind:${turnMeta.request_kind}`);
-    for (const [name, text] of Object.entries(needles)) if (bodyText.includes(text)) mark(`request:${name}`);
+    if (isObject(turnMeta) && isObject(turnMeta.compaction)) mark(`compaction-trigger:${turnMeta.compaction.trigger}`);
+    for (const name of HINT_HEADERS) {
+      const value = headers.get(`x-claude-code-${name}`);
+      if (value) mark(`hint:${name}:${value}`);
+    }
+    if (headers.has("x-claude-code-prompt-id")) mark("hint:prompt-id");
+    for (const [name, text] of Object.entries(needles)) {
+      if (typeof text === "string" ? bodyText.includes(text) : text.test(bodyText)) mark(`request:${name}`);
+    }
     emit("start", call);
 
     // If the gateway goes away, stop the provider too.
@@ -158,6 +177,17 @@ export async function startChaosProxy(
         if (type === "content_block_start" && isObject(d.content_block)) mark(`block:${d.content_block.type}`);
         if (type === "content_block_delta" && isObject(d.delta)) mark(`delta:${d.delta.type}`);
         if (type === "response.output_item.added" && isObject(d.item)) mark(`item:${d.item.type}`);
+        // Which tools the model called: Anthropic tool_use blocks, OpenAI
+        // function and custom tool calls (Codex groups tools in namespaces).
+        if (type === "content_block_start" && isObject(d.content_block) && d.content_block.type === "tool_use") mark(`tool:${d.content_block.name}`);
+        if (type === "response.output_item.added" && isObject(d.item) && (d.item.type === "function_call" || d.item.type === "custom_tool_call")) {
+          mark(`tool:${typeof d.item.namespace === "string" ? `${d.item.namespace}/` : ""}${d.item.name}`);
+        }
+        // Codex code mode (0.169): the model calls tools, MCP tools included,
+        // from JavaScript in the exec tool's input: `await tools.<name>(...)`.
+        if (type === "response.output_item.done" && isObject(d.item) && d.item.type === "custom_tool_call" && typeof d.item.input === "string") {
+          for (const m of d.item.input.matchAll(/\btools\.([A-Za-z_]\w*)\s*\(/g)) mark(`exec-tool:${m[1]}`);
+        }
         const isText = (type === "content_block_delta" && isObject(d.delta) && d.delta.type === "text_delta") || type === "response.output_text.delta";
         if (isText && plan && !reached && ++textDeltas >= plan.afterTextDeltas) hit = reached = true;
       }

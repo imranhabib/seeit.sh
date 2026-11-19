@@ -1,12 +1,12 @@
-// Reads what the gateway recorded.
+// Reads what the ledger service stored for the calls the gateway recorded.
 //
-// Today that is the gateway's SQLite ledger. When the ledger service exists
-// (PLAN.md, Phase 1C), only this file changes: it will call the ledger's read
-// API instead. Nothing else in Iris knows where calls are stored.
+// Today Iris reads the ledger's PostgreSQL database directly. When the
+// ledger's read API exists (PLAN.md, Phase 1C), only this file changes.
+// Nothing else in Iris knows where calls are stored.
 
-import Database from "better-sqlite3";
+import type { Pool } from "pg";
 
-/** One ledger row, with the columns Iris uses (snake_case, as stored). */
+/** One ledger row, with the columns Iris uses (snake_case column names; JSON values as text). */
 export type CallRecord = {
   id: string;
   started_at: string;
@@ -33,23 +33,30 @@ export type CallRecord = {
 };
 
 /** Calls that started at or after `since` (ISO time), oldest first. */
-export function readCalls(dbPath: string, since = ""): CallRecord[] {
-  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-  try {
-    return db.prepare("select * from calls where started_at >= ? order by started_at").all(since) as CallRecord[];
-  } finally {
-    db.close();
-  }
+export async function readCalls(db: Pool, since = ""): Promise<CallRecord[]> {
+  const { rows } = await db.query("select * from calls where started_at >= $1 order by started_at", [since || "1970-01-01T00:00:00Z"]);
+  // PostgreSQL returns dates and JSON values; Iris's checks were written for
+  // the stored text form, so convert back.
+  const json = (v: unknown) => (v === null || v === undefined ? null : JSON.stringify(v));
+  return rows.map((r) => ({
+    ...r,
+    started_at: (r.started_at as Date).toISOString(),
+    tokens_estimated: r.tokens_estimated ? 1 : 0,
+    server_tool_use: json(r.server_tool_use),
+    flags: json(r.flags),
+    unknown_events: json(r.unknown_events),
+    unknown_usage_fields: json(r.unknown_usage_fields),
+  })) as CallRecord[];
 }
 
 /**
- * The gateway writes a row after each response ends, in the background.
- * Wait until at least `count` rows exist since `since`, or time out.
+ * The ledger stores a row after the gateway delivers the call, in the
+ * background. Wait until at least `count` rows exist since `since`, or time out.
  */
-export async function waitForCalls(dbPath: string, since: string, count: number, timeoutMs = 15_000): Promise<CallRecord[]> {
+export async function waitForCalls(db: Pool, since: string, count: number, timeoutMs = 15_000): Promise<CallRecord[]> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const rows = readCalls(dbPath, since);
+    const rows = await readCalls(db, since);
     if (rows.length >= count || Date.now() > deadline) return rows;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }

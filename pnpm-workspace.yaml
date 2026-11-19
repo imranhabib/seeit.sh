@@ -4,7 +4,6 @@ packages:
 
 # Only packages listed here may run install scripts.
 allowBuilds:
-  better-sqlite3: true # downloads or compiles the native SQLite binding
   # esbuild's script only checks for its platform binary, which pnpm already
   # installs as an optional dependency (@esbuild/<platform>). Not needed.
   esbuild: false

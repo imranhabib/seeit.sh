@@ -37,11 +37,8 @@ model_provider = "seeit"
 
 then `codex --profile seeit`.
 
-Summarize what was recorded:
-
-```bash
-pnpm summarize
-```
+The spike's `pnpm summarize` script has since been removed; the ledger now
+holds this data (see the README).
 
 ## Findings (2026-11-13, claude-cli 2.1.322, codex 0.153.4)
 

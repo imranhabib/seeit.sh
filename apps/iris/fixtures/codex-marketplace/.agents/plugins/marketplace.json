@@ -1,0 +1,4 @@
+{
+  "name": "iris",
+  "plugins": [{ "name": "iris-plugin", "source": { "source": "local", "path": "./plugins/iris-plugin" } }]
+}

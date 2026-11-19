@@ -14,6 +14,14 @@ const EVENTS = [
   { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "three" } },
   { type: "message_stop" },
 ];
+// Tool calls in both providers' formats (Anthropic block, OpenAI output item with a namespace).
+const TOOL_EVENTS = [
+  { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: "mcp__iris__echo", input: {} } },
+  { type: "response.output_item.added", item: { type: "function_call", name: "spawn_agent", namespace: "collaboration", arguments: "{}" } },
+  { type: "response.output_item.added", item: { type: "custom_tool_call", name: "exec", input: "" } },
+  // Codex code mode: the model calls tools from JavaScript in the exec tool's input.
+  { type: "response.output_item.done", item: { type: "custom_tool_call", name: "exec", input: 'const r = await tools.mcp__iris__echo({text:"hi"});\nawait tools.exec_command({cmd:"ls"});' } },
+];
 let seenHeaders: IncomingHttpHeaders = {};
 let seenBody = "";
 let sawClose = false;
@@ -29,11 +37,12 @@ const provider: Server = createServer((req, res) => {
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
+    const events = req.url === "/v1/tools" ? TOOL_EVENTS : EVENTS;
     let n = 0;
     const timer = setInterval(() => {
-      const e = EVENTS[n]!;
+      const e = events[n]!;
       res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
-      if (++n === EVENTS.length) {
+      if (++n === events.length) {
         clearInterval(timer);
         res.end();
       }
@@ -49,7 +58,7 @@ let proxy: ChaosProxy;
 beforeAll(async () => {
   await new Promise<void>((resolve) => provider.listen(0, "127.0.0.1", resolve));
   const fake = `http://127.0.0.1:${(provider.address() as AddressInfo).port}`;
-  proxy = await startChaosProxy({ claude: fake, codex: fake }, { "hook-note": "Project note" });
+  proxy = await startChaosProxy({ claude: fake, codex: fake }, { "hook-note": "Project note", "leak-mcp": /"name":"mcp__(?!iris__)/ });
 });
 afterAll(async () => {
   await proxy.close();
@@ -153,10 +162,37 @@ describe("chaos proxy", () => {
   // "turn", "compaction").
   it("marks the Codex request kind", async () => {
     const { events, stop } = record();
-    const headers = { "x-codex-turn-metadata": JSON.stringify({ request_kind: "compaction", session_id: "s" }) };
+    const compaction = { trigger: "manual", reason: "user_requested" };
+    const headers = { "x-codex-turn-metadata": JSON.stringify({ request_kind: "compaction", session_id: "s", compaction }) };
     await (await fetch(`${proxy.url}/codex/v1/plain`, { method: "POST", headers, body: "{}" })).text();
     stop();
-    expect(events.at(-1)!.call.markers["request-kind:compaction"]).toBe(1);
+    expect(events.at(-1)!.call.markers).toMatchObject({ "request-kind:compaction": 1, "compaction-trigger:manual": 1 });
+  });
+
+  it("matches a needle given as a pattern", async () => {
+    const { events, stop } = record();
+    await (await turn({ tools: [{ name: "mcp__iris__echo" }], messages: [{ role: "user", content: "hi" }] })).text();
+    await (await turn({ tools: [{ name: "mcp__other__tool" }], messages: [{ role: "user", content: "hi" }] })).text();
+    stop();
+    const ends = events.filter((e) => e.type === "end");
+    expect(ends[0]!.call.markers["request:leak-mcp"]).toBeUndefined();
+    expect(ends[1]!.call.markers["request:leak-mcp"]).toBe(1);
+  });
+
+  // Claude Code sends these with CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 (ADR 0008, 0009).
+  it("marks Claude Code's gateway hint headers", async () => {
+    const { events, stop } = record();
+    const headers = { "x-claude-code-compaction": "manual", "x-claude-code-request-class": "compaction", "x-claude-code-prompt-id": "p1", "x-claude-code-context-compacted": "auto" };
+    await (await fetch(`${proxy.url}/claude/v1/plain`, { method: "POST", headers, body: "{}" })).text();
+    stop();
+    expect(events.at(-1)!.call.markers).toMatchObject({ "hint:compaction:manual": 1, "hint:request-class:compaction": 1, "hint:prompt-id": 1, "hint:context-compacted:auto": 1 });
+  });
+
+  it("marks the tools a response calls, with the Codex namespace", async () => {
+    const { events, stop } = record();
+    await (await fetch(`${proxy.url}/claude/v1/tools`, { method: "POST", body: "{}" })).text();
+    stop();
+    expect(events.at(-1)!.call.markers).toMatchObject({ "tool:mcp__iris__echo": 1, "tool:collaboration/spawn_agent": 1, "tool:exec": 1, "exec-tool:mcp__iris__echo": 1, "exec-tool:exec_command": 1 });
   });
 
   it("returns 404 for an unknown harness", async () => {
