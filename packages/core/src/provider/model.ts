@@ -178,3 +178,19 @@ export type StreamInterpreter = {
   onEvent(event: SseEvent, atMs: number): void;
   summary(): StreamSummary;
 };
+
+// --- Header values -------------------------------------------------------------
+
+/** A header value as a number, or null when it is missing or not a number. */
+export function numberFrom(text: string | null | undefined): number | null {
+  if (text === null || text === undefined || text.trim() === "") return null;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Unix time (seconds or milliseconds) as ISO 8601, or null. */
+export function isoFromUnix(value: number | null, unit: "s" | "ms" = "s"): string | null {
+  if (value === null) return null;
+  const date = new Date(unit === "s" ? value * 1000 : value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}

@@ -105,6 +105,10 @@ SEEIT_LEDGER_URL=http://127.0.0.1:8788 pnpm dev   # gateway on http://127.0.0.1:
 Without `SEEIT_LEDGER_URL` and `SEEIT_LEDGER_WRITE_TOKEN` the gateway still
 forwards traffic, but records nothing.
 
+Every recorded call belongs to a seeit user, `SEEIT_USER_ID` (default
+`local`). There is no sign-in yet: the ledger trusts the value the gateway
+sends (ADR 0009).
+
 Send a harness through it (in another terminal):
 
 ```bash
@@ -115,7 +119,7 @@ For Codex, see [docs/phase-0-recorder.md](docs/phase-0-recorder.md).
 
 Every call becomes one row in the ledger's PostgreSQL database, with tokens,
 timings, turn, completion status, and plan-quota headers. Request and response
-bodies are stored gzipped for 14 days. The ledger prints one line per stored
+bodies are stored gzipped and kept. The ledger prints one line per stored
 call. For example, recent calls:
 
 ```bash

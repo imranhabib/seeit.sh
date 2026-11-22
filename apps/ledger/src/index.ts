@@ -1,7 +1,6 @@
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.ts";
 import { openDatabase } from "./db/database.ts";
-import { pruneBodies } from "./db/retention.ts";
 
 // Configuration messages are our own text, so they are safe to print.
 // Database errors are not: they can contain the connection URL.
@@ -40,20 +39,10 @@ async function main() {
     throw err;
   }
 
-  // Drop bodies older than the retention period, now and every 6 hours.
-  const prune = () =>
-    pruneBodies(database)
-      .then((removed) => removed && console.log(`[ledger] pruned ${removed} old bodies`))
-      .catch(() => console.error("[ledger] pruning old bodies failed"));
-  void prune();
-  const pruneTimer = setInterval(prune, 6 * 60 * 60 * 1000);
-  pruneTimer.unref();
-
   let stopping = false;
   const stop = () => {
     if (stopping) return;
     stopping = true;
-    clearInterval(pruneTimer);
     server.close(() => {
       void database.close().catch(() => {
         console.error("[ledger] database shutdown failed");

@@ -12,16 +12,13 @@
 // - Errors never echo request content, SQL, or connection details.
 
 import { createHash, timingSafeEqual } from "node:crypto";
-import { promisify } from "node:util";
-import { gzip } from "node:zlib";
 import { analyzeCall, hasFixture, type RecordedCall } from "@seeit/core";
 import { and, eq, isNotNull } from "drizzle-orm";
 import type { Context } from "hono";
 import type { LedgerDatabase } from "./db/database.ts";
-import { bodies, calls } from "./db/schema.ts";
+import { calls } from "./db/schema.ts";
 import { logCall } from "./log.ts";
-
-const gzipAsync = promisify(gzip);
+import { prepareCall, storeCall } from "./store.ts";
 
 /** Largest accepted recording. Request bodies reach hundreds of KB; long streams a few MB. */
 export const MAX_RECORDING_BYTES = 64 * 1024 * 1024;
@@ -45,18 +42,14 @@ export function createIngest(database: LedgerDatabase, writeToken: string) {
     if (problem) return c.json({ error: problem }, 400);
     const call = payload as RecordedCall;
 
-    const { fields, error } = analyzeCall(call);
+    const analyzed = analyzeCall(call);
+    const { fields, error } = analyzed;
     // Never log the error itself: it can quote request or response content.
     if (error !== undefined) console.error(`[ledger] analysis failed for call ${call.id}; stored as gateway_error`);
 
-    // gzip runs on libuv's thread pool, outside the transaction.
-    const [requestGz, responseGz] = await Promise.all([
-      call.request.body ? gzipAsync(call.request.body) : null,
-      call.response.body ? gzipAsync(call.response.body) : null,
-    ]);
-    const startedAt = new Date(fields.startedAt);
-
     try {
+      // Hashing and gzip run outside the transaction.
+      const prepared = await prepareCall(database.db, call, analyzed);
       const stored = await database.db.transaction(async (tx) => {
         // ADR 0005, layer 3: flag the first checked call from a harness
         // version with no fixture. Asked before this row is written.
@@ -65,14 +58,7 @@ export function createIngest(database: LedgerDatabase, writeToken: string) {
         const hasEarlier = async () =>
           (await tx.select({ id: calls.id }).from(calls).where(and(eq(calls.harnessVersion, version!), isNotNull(calls.flags))).limit(1)).length > 0;
         if (await isFirstUntested(version, hasEarlier)) flags.push("untested_harness_version");
-        const inserted = await tx
-          .insert(calls)
-          .values({ ...fields, startedAt, flags })
-          .onConflictDoNothing({ target: calls.id })
-          .returning({ id: calls.id });
-        if (inserted.length === 0) return null; // already stored: a retry
-        await tx.insert(bodies).values({ callId: call.id, createdAt: startedAt, requestGz, responseGz });
-        return flags;
+        return (await storeCall(tx, call, analyzed, prepared, flags)) ? flags : null;
       });
       if (!stored) return c.json({ status: "duplicate" }, 200);
       logCall({ ...fields, flags: stored });
@@ -115,6 +101,8 @@ const isStringRecord = (v: unknown) => isObject(v) && Object.values(v).every(isS
 export function checkRecordedCall(v: unknown): string | null {
   if (!isObject(v)) return "body must be an object";
   if (!isString(v.id) || v.id.length === 0 || v.id.length > 200) return "id must be a string of 1-200 characters";
+  if (!isString(v.userId) || v.userId.length === 0 || v.userId.length > 200) return "userId must be a string of 1-200 characters";
+  if (!Number.isSafeInteger(v.seq) || (v.seq as number) < 0) return "seq must be a non-negative integer";
   if (!isString(v.startedAt) || Number.isNaN(Date.parse(v.startedAt))) return "startedAt must be an ISO 8601 time";
   if (v.harness !== "claude" && v.harness !== "codex") return 'harness must be "claude" or "codex"';
   if (!isString(v.method) || !isString(v.path)) return "method and path must be strings";

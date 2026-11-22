@@ -6,14 +6,20 @@
 // (timings, whether the client left, whether reading upstream failed). All
 // parsing happens in analyzeCall, so it can run in the ledger.
 
+import { requestPieces } from "./pieces.ts";
 import { decideCompletion, type Completion } from "./completion.ts";
 import { callFlags, type Flag } from "./flags.ts";
-import { quotaHeaders, readRequest, usageFromJsonBody } from "./provider/index.ts";
+import { quotaHeaders, readCallDetails, readCallRecords, readRequest, usageFromJsonBody } from "./provider/index.ts";
 import { estimateTokens, parseJson, type CallKind, type Harness, type RequestInfo, type StreamSummary, type Usage } from "./provider/model.ts";
-import { interpretResponse } from "./response.ts";
+import { NO_DETAILS, type CallDetails, type CallRecords } from "./records.ts";
+import { interpretResponse, streamEvents } from "./response.ts";
 
 export type RecordedCall = {
   id: string;
+  /** seeit's own user (ADR 0009): the gateway's SEEIT_USER_ID, "local" by default. */
+  userId: string;
+  /** Per gateway process, in request order; breaks ties in startedAt (ADR 0008). */
+  seq: number;
   /** ISO 8601, UTC. */
   startedAt: string;
   harness: Harness;
@@ -46,8 +52,10 @@ export type RecordedCall = {
 };
 
 /** One ledger row's fields. JSON columns are values here; each store serializes them its own way. */
-export type CallFields = {
+export type CallFields = CallDetails & {
   id: string;
+  userId: string;
+  seq: number;
   startedAt: string;
   harness: Harness;
   harnessVersion: string | null;
@@ -87,6 +95,10 @@ export type CallFields = {
 
 export type AnalyzedCall = {
   fields: CallFields;
+  /** Rows for the ledger's other tables (ADR 0009); empty when analysis failed, except the request pieces. */
+  records: CallRecords;
+  /** Where the call's turn ID came from: the harness sent it, or the gateway inferred it. Null without a turn. */
+  turnSource: "harness" | "inferred" | null;
   /** What the response stream showed; null when analysis failed. */
   stream: StreamSummary | null;
   /** Set when analysis failed; the fields then record a gateway_error. */
@@ -100,6 +112,7 @@ export function analyzeCall(call: RecordedCall): AnalyzedCall {
   const responseHeaders = new Headers(response.headers);
 
   let fields: CallFields;
+  let records: CallRecords;
   let stream: StreamSummary | null = null;
   let error: unknown;
   try {
@@ -136,18 +149,39 @@ export function analyzeCall(call: RecordedCall): AnalyzedCall {
       unknownEvents: s.unknownEvents,
       unknownUsageFields: s.unknownUsageFields,
     };
+    const input = {
+      harness,
+      method: call.method,
+      path: call.path,
+      status: response.status,
+      requestHeaders: new Headers(call.request.headers),
+      requestText: call.request.body,
+      responseHeaders,
+      responseText: response.body,
+      events: interpreted.isStream ? streamEvents(response.body ?? "") : [],
+      usage,
+      quota: fields.quota,
+    };
+    Object.assign(fields, readCallDetails(input));
+    records = readCallRecords(input);
   } catch (err) {
     error = err;
     fields = { ...base, httpStatus: response.status, completion: "gateway_error", ...usageColumns(null) };
+    // The request is still stored, so a failed analysis can be run again later.
+    records = { ...NO_RECORDS, pieces: requestPieces(harness, call.request.body) };
   }
   fields.flags = callFlags(fields, stream);
-  return { fields, stream, ...(error === undefined ? {} : { error }) };
+  const turnSource = call.turnId === null ? null : call.turnId === info.explicitTurnId ? "harness" : "inferred";
+  return { fields, records, turnSource, stream, ...(error === undefined ? {} : { error }) };
 }
 
 /** The fields known from the request alone; analysis fills in the rest. */
 function callRow(call: RecordedCall, info: RequestInfo): Omit<CallFields, "completion" | keyof ReturnType<typeof usageColumns>> {
   return {
+    ...NO_DETAILS,
     id: call.id,
+    userId: call.userId,
+    seq: call.seq,
     startedAt: call.startedAt,
     harness: call.harness,
     harnessVersion: info.harnessVersion,
@@ -174,6 +208,8 @@ function callRow(call: RecordedCall, info: RequestInfo): Omit<CallFields, "compl
     unknownUsageFields: null,
   };
 }
+
+const NO_RECORDS: CallRecords = { pieces: [], toolUses: [], toolResults: [], quotaWindows: [], contextParts: [], modelCatalog: [] };
 
 // A model call that never reported usage (for example a Codex stream cut
 // before response.completed) still cost tokens. Estimate both sides.

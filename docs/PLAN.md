@@ -228,7 +228,14 @@ These rules are the performance-critical part of the system:
   **estimated** from the text deltas received, marked as an estimate in the
   ledger. Otherwise interrupted calls would show zero output, and budgets would
   undercount.
-- **Bodies:** full request and response bodies, gzipped, 14-day retention.
+- **Bodies:** full request and response bodies, gzipped. No retention for now:
+  everything is kept (decided 2026-11-18; storing requests as pieces makes this
+  affordable, about 0.2-0.5 GB per month at the owner's 2026-11-18 traffic).
+  Requests are stored as pieces, each distinct piece once per session, and
+  rebuilt from a recipe ([ADR 0009](adr/0009-ledger-data-model.md)).
+- **Users:** every session and call belongs to a seeit user (`users`, ADR
+  0009), `'local'` by default, so the data model supports more than one
+  person from the start. Sign-in and permissions come later.
 - **Traces:** OpenTelemetry (GenAI semantic conventions) exported to a
   self-hosted Langfuse.
 - **Prices:** a pinned copy of LiteLLM's `model_prices_and_context_window.json`
@@ -330,7 +337,7 @@ plural noun lists (`calls`), a singular noun shows one (`call <id>`).
   itself.
 - **No new dependency for argument parsing.** Use Node's built-in
   `util.parseArgs`.
-- **Developer tasks stay in the `justfile`** (`just reset`, `just test`). The
+- **Developer tasks stay in the `justfile`** (`just reset-recordings`, `just test`). The
   CLI is for operating and inspecting the gateway, not for working on its
   code.
 - **Build order:** `calls`, `call`, `sessions`, `session` first. They
@@ -368,6 +375,7 @@ traffic.
 | -- | ------------------------------- | ------- |
 | A  | Context composition breakdown   | 2       |
 | B  | Cache-break detector            | 2       |
+| I  | Prompt cache and compaction explainer (key feature) | 2 |
 | C  | Plan-quota forecast             | 2       |
 | D  | Repo / branch attribution       | 3       |
 | E  | Waste detection                 | 2       |
@@ -588,12 +596,213 @@ it.
    - **Not covered yet.** Nested subagents, Claude Code's automatic
      compaction, Esc interrupt, and Codex's `/compact` command.
 5. **Flagged calls become fixtures (layer 4).** Let `make-fixture` read a call
-   from the ledger by ID (bodies are kept 14 days), so a call flagged in step 1
+   from the ledger by ID (bodies are kept), so a call flagged in step 1
    can become a reviewed regression test.
 6. **Better output estimate for cut streams.** Replace the 4-characters-per-
    token rule with a tokenizer count of the received text, as LiteLLM does in
    `_recover_interrupted_stream_output_tokens`. The 4-character rule is rough,
    and code and non-English text tokenize differently from prose.
+
+#### Phase 1 follow-ups: field inventory, prompt caching, and compaction (2026-11-18)
+
+From every field of 305 Claude Code 2.1.326 and 283 Codex 0.169.1 Iris
+recordings, first calls and later calls. The inventory script read field
+names and short setting values only, never text. None of these fields is
+stored today; the **Ledger data model** PR stores them
+([ADR 0009](adr/0009-ledger-data-model.md), "Context parts, caching, and
+compaction detail"). Feature I (Phase 2) shows them.
+
+**Settings.** No harness setting sends more data than what is listed here.
+Claude Code needs `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` (Iris sets it). Codex
+sends everything below by default. The `include_skills_usage_instructions`,
+`include_apps_usage_instructions`, `include_plugin_usage_instructions`, and
+`supports_reasoning_effort_updates` fields are in Codex's `/models` catalog:
+they are server-side model settings that tell Codex which instruction blocks
+to add to the prompt, not user settings.
+
+**Startup context**
+
+1. **Codex reports exact tokens per input item.** `response.completed` →
+   `usage.attribution.items` maps each item ID to `input_tokens`,
+   `cached_tokens`, `cache_write_tokens`, and `output_tokens`, with a
+   `content` array that has the same four counts per content part. It was on
+   172 of 181 `/responses` calls; the others were cut or interrupted. The
+   keys are the `id` fields of the request's input items (2,133 of 2,145
+   matched), plus the response's own output items (226, with output tokens).
+   **The keys come sorted by ID, not in input order: map them by ID, never by
+   position.** ID prefixes: `at` additional_tools, `msg` message, `ctc` /
+   `ctco` custom tool call / output, `fc` / `fco` function call / output, `rs`
+   reasoning, `amsg` agent message, `cnfu` configuration update (no `id` in
+   the request; 7 seen, not mapped yet). A first call:
+
+   | Input item | Chars | Tokens |
+   | --- | --- | --- |
+   | `additional_tools` (functions, clock, collaboration namespaces) | 28,042 | 5,712 |
+   | Developer: base instructions (same text as `/models` `base_instructions`) | 17,793 | 3,456 |
+   | Developer, 5 parts: `<skills_instructions>`, `<permissions instructions>`, `<collaboration_mode>`, `<tools>` (deferred MCP namespaces), `<recommended_plugins>` | 2,151 / 594 / 1,056 / 2,471 / 780 | 487 / 139 / 199 / 517 / 235 |
+   | Developer: `<multi_agent_role>` | 2,400 | 534 |
+   | Developer: `<multi_agent_mode>` | 271 | 56 |
+   | User: `<environment_context>` | 1,060 | 293 |
+   | User: the prompt | — | 26 |
+
+2. **Claude Code reports totals only.** Its first request has a fixed layout
+   that can be labeled reliably; the provider reported 14,345 input tokens
+   for this one (≈ 2.8 characters per token overall):
+
+   | Part | Where | Chars |
+   | --- | --- | --- |
+   | Billing block (`cc_version=2.1.326.538; cc_entrypoint=sdk-cli`) | `system[0]`, not cached | 74 |
+   | Identity line and main prompt | `system[1]`, `system[2]` | 62 + 6,648 |
+   | Project and user instructions, one file per `Contents of … (user's private global instructions …)` / `(project instructions …)` header | `messages[0]`, first `<system-reminder>` | 3,480 |
+   | Context and git-attribution reminders | `messages[0]`, next blocks | 967 + 582 |
+   | The prompt | `messages[0]`, last block | 64 |
+   | Environment | a `role: "system"` message | 2,936 |
+   | Tool definitions, 12 (Agent 3,962; Bash 3,731; ScheduleWakeup 4,631; ...); deferred tools marked `defer_loading: true` | `tools` | 24,785 |
+
+   Per-part counts are estimates (PLAN "Accounting and evidence rules"). The
+   two tokenizers differ (Codex: about 4.9 characters per token for tool
+   JSON and 5.1 for prose; Claude: about 2.8 overall), so estimates need a
+   ratio per provider and per kind of content, checked against reported
+   totals for each harness version. **Cache breakpoints give exact
+   anchors:** a cache read ends at a breakpoint, so a read of exactly the
+   prefix up to `system[2]` is the exact size of tools + system (11,528
+   tokens on 16 Opus main-agent calls). Anthropic's `count_tokens` endpoint
+   could count each part exactly, but only as a separate request with the
+   user's credentials; use it, if at all, in Iris to check the ratios, never
+   in the gateway.
+
+**Prompt caching**
+
+3. **Claude Code sets up to 4 breakpoints** (the API maximum). The prefix
+   order is tools → system → messages. Breakpoints: `system[1]`, `system[2]`
+   (the end of tools + system; tools have no breakpoint of their own), then
+   either the last assistant and last user message or the trailing
+   `role: "system"` message (133 calls had 4, 80 had 3).
+4. **Two cache lifetimes, chosen per agent.** The main agent marks every
+   breakpoint `ttl: "1h"` (174 calls). Subagents (33 calls) and the
+   compaction call use the default 5 minutes and write their own prefix,
+   because their system prompt and tools differ. The cache is shared across
+   sessions (live finding 6): a session's first call read 11,528 tokens that
+   an earlier session wrote.
+5. **Some Claude Code calls are never cached.** The web-search call (one
+   message, one tool, no breakpoints) reads about 11,000 tokens of search
+   results uncached; its `usage.iterations` has two entries (the server-side
+   search loop) with their own counts. One 56,004-token call with one
+   message and no tools was also fully uncached.
+6. **Context editing is a third mechanism.** Every Claude Code request sends
+   `context_management.edits: [{type: "clear_thinking_20251015", keep:
+   "all"}]`; the response reports `context_management.applied_edits`, empty
+   on all 207 calls here. When it is not empty, it says which content the
+   API removed before the model saw it.
+7. **Codex caching is automatic.** There are no breakpoints. Each request
+   sends `prompt_cache_key` (equal to the session ID), and the response reports
+   `prompt_cache_retention: "24h"`. `cached_tokens` was a multiple of 128 on
+   all 160 calls with a cache hit: the cache works in 128-token blocks, so
+   the cache boundary can fall inside an item (the environment context: 293
+   tokens, 138 cached). `cache_write_tokens` and its split by lifetime
+   (`ttl_30m_tokens`, `ttl_12h_tokens`) were 0 on every call; store them
+   anyway. Attribution (finding 1) shows, per item, exactly what was read
+   from cache and what was not.
+8. **Codex sends earlier reasoning again on every call.** `store: false`,
+   `include: ["reasoning.encrypted_content"]`, and `reasoning.context:
+   "all_turns"`: earlier reasoning items (`rs`) go back as encrypted input,
+   and subagent messages (`amsg`) carry encrypted parts. They cost input
+   tokens (mostly cached); attribution counts them.
+9. **Codex truncates tool output** before sending it: the catalog's
+   `truncation_policy` is `{mode: "tokens", limit: 10000}`. The response's
+   own `truncation` is `"disabled"`.
+10. **How a Codex history starts** is in the turn metadata,
+    `history_initialization`: `new` (150 calls), `warm_fork` (30: a subagent
+    starts from its parent's history, so it can reuse the parent's cache),
+    and `cold_resume` (22: the history was rebuilt after an automatic
+    compaction).
+
+**Compaction**
+
+11. **Claude Code compaction (manual, seen live).** The compaction call
+    (`x-claude-code-request-class: compaction`, `x-claude-code-compaction:
+    manual`) sends the same tools and system as the main agent, all 12
+    messages, and one more user message with the compaction instructions
+    (6,912 characters), with 5-minute breakpoints. Cost: 17,905 tokens read
+    from cache, 2,160 uncached, 53 written; 1,143 output tokens (the summary,
+    3,214 characters). The next call has 6 messages, the first one holding
+    the summary. It read 12,132 (tools + system) and **wrote 6,846 again**:
+    the whole new history is a cache write, at the 1-hour rate.
+12. **Codex compaction (`strategy: "memento"`).** A normal `POST
+    /responses` with `request_kind: "compaction"` and `compaction:
+    {trigger, reason, implementation: "responses", phase, strategy}`;
+    `phase` is `pre_turn` (automatic, before the new turn's first call) or
+    `standalone_turn` (manual). It sends the whole history plus a user
+    message with the compaction prompt (519 characters). The answer is one
+    `final_answer` message of 388–568 characters (79–133 output tokens). Cost
+    of one automatic compaction: 15,940 input (14,976 cached), 118 output.
+    The next call has the same prefix (tools, developer messages,
+    environment), then the earlier user prompts, the summary as a user
+    message, and the new prompt; assistant, tool, and reasoning items are
+    gone. `window_number` goes up by one. Its input fell from 15,138 to
+    11,865 tokens (3,273 fewer on each later call); the cached part fell to
+    8,960 (the prefix up to the environment context).
+13. **Compaction does not always make the context smaller.** In the small
+    Iris sessions, Claude Code's input went from 17,909 to 18,980 tokens
+    after compacting, and the Codex manual compaction from 15,153 to 15,326.
+    Measure before and after; never assume a saving.
+14. **What decides when Codex compacts** is in the `/models` catalog:
+    `context_window` (272,000 or 500,000), `max_context_window` (872,000),
+    `auto_compact_token_limit` (null for all 12 models; the user's
+    `model_auto_compact_token_limit` setting applies), and `comp_hash` (the
+    compaction prompt's version; `comp_hash_changed` is a compaction reason).
+    Claude Code makes no catalog call; its windows come from the price file,
+    and its automatic threshold is not visible to the gateway.
+15. **The API can say why the cache missed.** Every Claude `message_start`
+    has `message.diagnostics`; it was `null` on all 217 Iris calls, and the
+    parser ignores it. Claude Code's session files show what it holds when
+    set: `cache_miss_reason: {type, cache_missed_input_tokens}`, with types
+    `previous_message_not_found`, `model_changed`, and `unavailable` (seen in
+    the owner's own transcripts, 2026-11-18). It is the provider's own
+    answer to what B infers, so B shows it first when it is present.
+
+**Gateway compared with the harnesses' session files**
+
+Both harnesses write a session file on the local machine (Claude Code:
+`~/.claude/projects/<project>/<session>.jsonl`; Codex:
+`~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl`). Checked on
+2026-11-18 against the 40 newest Claude Code and 20 newest Codex files,
+field names and numbers only.
+
+- **Only the gateway has:** every call, including background calls, harness
+  retries, and failed calls; timings (headers, first token, stream end);
+  completion status; the exact request (system prompt, tool definitions,
+  injected reminders, in order), which feature I needs; Codex per-item cache
+  state (`usage.attribution`); Claude plan-quota headers; and the ability to
+  act before a request (budgets, routing). Its format is the provider API,
+  which changes less than the files.
+- **Only the session files have:** Claude Code `compactMetadata` (`trigger`,
+  `preTokens`, `postTokens`, `durationMs`, `cumulativeDroppedTokens`, for
+  example 925,401 → 23,968 tokens in an automatic compaction, which Iris
+  cannot trigger); tool and thinking durations; `attributionSkill` /
+  `attributionPlugin`; Codex `content_token_count` per item and
+  `model_context_window`; and sessions from installs that do not use the
+  gateway. The files are undocumented internals that change between
+  versions, hold full content and paths, and Claude Code deletes old ones.
+- **Decision:** the gateway stays the source of truth. A later, optional
+  importer adds file-only facts to calls the ledger already has, matched by
+  `provider_request_id` (4,605 of 4,607 Claude Code assistant entries carry
+  `requestId`). It never creates calls, and it reads labels and numbers
+  only, never content or paths. See Phase 2.
+
+**Other fields worth storing**
+
+| Harness | Field | Use |
+| --- | --- | --- |
+| Codex | Turn metadata `turn_started_at_unix_ms` | Order of requests from the harness itself (ADR 0008) |
+| Codex | Turn metadata `request_kind` (`turn`, `compaction`, `prewarm`, `memory`) | Call kind as the harness states it |
+| Codex | Turn metadata `turn_trigger`, `agent_name`, `reasoning_effort` | What started the turn, which agent sent it, and its effort |
+| Codex | `x-codex-beta-features` (`remote_compaction_v2`) | Feature changes between versions |
+| Claude Code | `system[0]` billing block (`cc_version`, `cc_entrypoint`) | The exact build, and CLI or SDK |
+| Claude Code | `x-stainless-retry-count` | The harness's own retry counter |
+| Claude Code | `anthropic-beta` list | Feature changes between versions (13 seen, including `extended-cache-ttl-2025-04-11` and `context-management-2025-06-27`) |
+| Claude Code | Usage `service_tier`, `inference_geo`, `speed` | How and where the request was served |
+| Claude Code | `output_config.effort`, `thinking.type` | Effort and thinking settings per call |
 
 #### Phase 1 follow-ups: findings from Iris runs (2026-11-17)
 
@@ -776,7 +985,7 @@ changes in one PR.
 | --- | --- | --- |
 | Architecture and contract requirements | Publish ADR 0007, service ownership, gateway-side credential scrubbing, read/write permissions, and ingestion acknowledgement/idempotency requirements. Specify v1 best-effort delivery and defer the durable outbox to v2. | Review success, duplicate, timeout, and failure scenarios; distinguish implemented behavior from the target architecture. |
 | PostgreSQL foundation | Add the standalone ledger package, native database setup, connection lifecycle, schema, and generated migrations. Preserve the latest parser fields and existing SQLite migration history. | Use a native PostgreSQL test database; store/read synthetic records and verify they remain after restart. No Docker requirement. |
-| Ledger data model | Add `sessions`, `turns`, `tool_uses`, and `quota_windows` (normalized plan-quota windows for both harnesses), and the new `calls` columns (sequence number, provider request ID, compaction trigger and reason), as one PostgreSQL migration (ADR 0009). | Synthetic records for both harnesses store and read back; tool uses keep labels only; the schema-match test allows the PostgreSQL-only tables. Iris covers, for Claude Code and Codex: manual and automatic compaction, an MCP tool, a skill, a plugin, and Claude Code with hint headers on. |
+| Ledger data model | Add `users` (every session and call belongs to one; the gateway sends `userId` from `SEEIT_USER_ID`, default `'local'`), request storage as pieces (`body_pieces`, `call_pieces`; each piece once per user, harness, and session), `sessions`, `turns`, `tool_uses`, `quota_windows` (normalized plan-quota windows for both harnesses), `context_parts` (each prompt part with tokens and cache state), and `model_catalog` (Codex `/models` facts), and the new `calls` columns (sequence number, provider request ID, compaction detail, cache detail, and the other fields from the 2026-11-18 inventory), as one PostgreSQL migration (ADR 0009). | Synthetic records for both harnesses store and read back; two users with the same session ID stay apart; a rebuilt request matches the original's content; a message whose only change is a moved `cache_control` marker is stored once; existing calls are backfilled to the user `local` with their sessions and turns; tool uses and context parts keep labels only; Codex parts map to attribution by item ID, not position; Claude parts are marked estimated except breakpoint anchors; Iris covers, for Claude Code and Codex: manual and automatic compaction, an MCP tool, a skill, a plugin, and Claude Code with hint headers on. |
 | Recording ingestion | Add the authenticated write endpoint, concrete recording payload/validation, and transactional idempotent writes. Scrub recording credentials before they leave the gateway; never send raw authorization headers. The payload carries `startedAt` and a per-process sequence number, and the stored call keeps the turn inputs (ADR 0008). | Duplicate submissions count once; a successful acknowledgement follows commit; invalid or unauthorized payloads are rejected. |
 | Gateway delivery client | Add bounded in-memory pending recordings, request timeouts, retries, and observable failure/overflow handling. No durable outbox in v1. Keep the existing recording path until cutover. | Slow/unavailable ledger, lost acknowledgements, saturation, and restart-loss tests; no waiting on ingestion in the provider-streaming path. |
 | Storage cutover | Switch gateway recording to the ledger service and remove gateway database ownership. Decide and document import/preservation of existing SQLite history before switching. Decided 2026-11-18: start fresh; the SQLite file is not imported. | Gateway needs no database credentials; real calls reach PostgreSQL with correct usage/flags; credential scrubbing leaves forwarded provider bytes unchanged; concurrent streaming tests pass. |
@@ -807,7 +1016,14 @@ gateway tracker, with Iris runs that set `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`.
   server-side fallback, each attempt in `usage.iterations` at its own
   model's rates (calls flagged `fallback_usage_partial`).
 - OTel export to Langfuse (Docker Compose).
-- Custom dashboard: A, B, C, E.
+- Custom dashboard: A, B, C, E, and I (the key feature, below).
+- Optional session-file importer (Phase 1 follow-ups, "Gateway compared
+  with the harnesses' session files"): reads Claude Code `compactMetadata`,
+  tool and thinking durations, and skill/plugin attribution, and Codex
+  `content_token_count`, and adds them to existing calls by
+  `provider_request_id`. Never creates calls; labels and numbers only.
+  Each harness version's file format is checked with an Iris recording
+  first, as for parsers (ADR 0005).
 - Frontend requirements and implementation order are defined below.
 - Deliver the separate ledger service and PostgreSQL transition, then extend
   its read API for the dashboard and CLI. Support both native and Docker local
@@ -815,6 +1031,84 @@ gateway tracker, with Iris runs that set `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`.
 - Quota tracking (C) uses only responses that carry quota headers. Responses
   without them (for example an upstream `429` with no
   `anthropic-ratelimit-unified-*` headers) are skipped, not read as zero.
+
+#### Feature I — Prompt cache and compaction explainer (key feature, agreed 2026-11-18)
+
+**Job:** show how each harness uses the prompt cache and compaction: how it
+is done, what is cached and what is not, and the tokens each one uses and
+saves. It builds on A (composition) and B (cache breaks), and it is the main
+content of the Cache page and of the session and call detail views. The
+facts it relies on are the field-inventory findings of 2026-11-18 (Phase 1
+follow-ups); the stored data is in ADR 0009 ("Context parts, caching, and
+compaction detail").
+
+**What the dashboard shows**
+
+1. **Startup context.** For a session's first call, and for the first call
+   of each context window after a compaction: the parts of the prompt by
+   category (system prompt, tool definitions, deferred tools, global and
+   project instructions, environment, skills, plugins, MCP, permissions and
+   collaboration, multi-agent, hook output, compaction summary, the prompt),
+   with tokens and characters per part. For each part: read from cache
+   (including a cache that an earlier session wrote), written to cache, or
+   uncached. Startup tokens = the first call's input minus the prompt.
+2. **Cache map per call.** A bar in prefix order (Claude: tools → system →
+   messages; Codex: input order) split into read, written, and uncached
+   segments, by part. Claude: the breakpoints and their lifetime (5 minutes
+   or 1 hour). Codex: the cache boundary, exact per item from attribution,
+   in 128-token blocks. When the cache broke: the provider's reason
+   (`cache_miss_reason`, finding 15) when it is sent, then the first changed
+   part (B).
+3. **Cache economics** per call, turn, and session: hit rate (cache reads ÷
+   total input); tokens read, written (by lifetime: 5m / 1h for Claude,
+   30m / 12h for Codex), and uncached; estimated API-equivalent savings
+   (reads × (input price − cache-read price)) and the cost of writes,
+   including the 1-hour premium. Savings are estimates, never subscription
+   money.
+4. **Cache lifetime.** The last hit and the expiry time of each prefix
+   (Claude: 5 minutes or 1 hour after the last hit; Codex: the reported
+   retention, `24h`). A gap longer than the lifetime followed by a rewrite
+   is a finding, "cache expired while idle", with its cost. It is expected
+   behavior; the finding shows what the pause cost.
+5. **Compaction events.** Trigger (auto, manual, reactive), reason, phase,
+   and strategy. The compaction call's cost (input read and uncached, output
+   = the summary) and the summary's size. Context before (the last call
+   before it) and after (the first call after it), tokens saved on each later
+   call, and the number of calls until it paid off, or "did not pay off"
+   (finding 13). The cache rewrite after it (Claude writes the whole new
+   history again). With the session-file importer, Claude Code's own
+   `preTokens` / `postTokens` and duration, including automatic compactions.
+6. **Context window fill.** Input tokens of each call against the model's
+   context window, and the automatic compaction threshold when it is known
+   (Codex: catalog or the user's setting; Claude: shown as unknown).
+7. **Other context mechanisms.** Claude context editing (`applied_edits`:
+   what the API removed); Codex tool-output truncation (the catalog's
+   `truncation_policy`); reasoning sent again on every Codex call (its tokens
+   and cached share); subagent prefixes (Claude subagents use 5-minute
+   breakpoints; Codex `warm_fork` starts from the parent's history).
+
+**Rules**
+
+- Every token number says where it comes from: `provider` (Codex
+  attribution, usage totals), `breakpoint` (exact, from a Claude cache read
+  that ends at a breakpoint), or `estimated` (characters × a ratio per
+  provider and kind of content). Claude parts show an unallocated difference
+  against the reported total; they are never forced to add up.
+- Show each harness's own mechanism. Claude: explicit breakpoints and
+  lifetimes. Codex: automatic prefix caching by `prompt_cache_key`. Do not
+  explain one with the other's rules.
+- "Saved" can be negative. Show the measured before and after, not an
+  expected saving.
+- A compaction is shown only from evidence: the harness says so (Codex
+  turn metadata; Claude hint headers). A size drop alone is a possible
+  compaction.
+- Labels are safe: categories, tool and skill names, and the kind of
+  instruction file (global, project, local). Never file paths or content.
+
+**Where it appears:** Cache page (economics, lifetime, breaks, compactions
+across sessions); session detail (startup context, cache economics,
+compaction events on the timeline, window fill); call detail (cache map and
+parts). API: `/api/cache` and `/api/calls/:id` carry it.
 
 #### Frontend delivery plan — agreed 2026-11-16
 
@@ -856,7 +1150,7 @@ dashboard exposes the same destinations and direct URLs. Proposed routes:
 | --- | --- | --- |
 | Overview | `/overview` | Usage over time, quota summary, recent sessions, and evidence-backed findings; open a session or finding. |
 | Sessions | `/sessions` | Searchable, filtered session list; open a session's accumulation and call detail. |
-| Cache | `/cache` | Cache reuse and break findings; compare requests and inspect the first changed prefix. |
+| Cache | `/cache` | Cache economics, lifetimes, reuse and break findings, and compaction events (feature I); compare requests and inspect the first changed prefix. |
 | Quota | `/quota` | Reported windows, usage, resets, observation age, and qualified forecasts. |
 
 Session detail uses `/sessions/:sessionId` and call detail `/calls/:callId`.
@@ -957,11 +1251,12 @@ missing headers, flat usage, and decreasing/corrected observations.
 
 Persist compact, versioned derived measurements and findings independently of
 raw bodies. Retain category/contributor measurements, safe tool labels,
-relationships, and event/finding metadata with call history after the 14-day
-body retention period. Raw content, excerpts, diffs, and copied source text
-must follow body retention; do not retain them indirectly in finding payloads.
-Older investigations keep charts and derived totals and explicitly show when
-source evidence has expired. Record analysis failures and coverage gaps.
+relationships, and event/finding metadata with call history. There is no body
+retention for now (decided 2026-11-18): bodies are kept. If retention returns,
+raw content, excerpts, diffs, and copied source text must follow it; do not
+retain them indirectly in finding payloads, and older investigations keep
+charts and derived totals and explicitly show when source evidence has
+expired. Record analysis failures and coverage gaps.
 
 Analyze new calls in the ledger service after ingestion. Keep expensive
 analysis bounded so it does not starve recording writes or dashboard reads.
@@ -1071,17 +1366,26 @@ constraints before the full dashboard is built.
    and evidence-backed compaction events. Persist derived results with a new
    generated migration; add bounded backfill for available bodies. Complete
    the per-call charts, contributor expansion, timeline, and evidence views.
+   Include feature I's startup context and per-call cache map from
+   `context_parts`.
    **Check:** both harness formats are covered; missing identity stays
    unattributed; estimates do not masquerade as reported totals; deleting
-   expired bodies preserves measurements and removes source excerpts.
+   expired bodies preserves measurements and removes source excerpts; Codex
+   parts match attribution by item ID; a Claude tools + system anchor equals
+   the cache read that ends at `system[2]`.
 4. **Explain cache behavior and surface findings (B, E).** Implement
    compatible-request selection, supported prefix/breakpoint comparison, and
    expected-versus-potentially-avoidable findings. Complete Cache and findings
    on Overview/session pages. Add accurate API-equivalent pricing after its
-   prerequisite parser fields and pinned prices are ready.
+   prerequisite parser fields and pinned prices are ready. Complete feature I:
+   cache economics, cache lifetime and idle expiry, compaction events with
+   before/after and break-even, context window fill, and the other context
+   mechanisms.
    **Check:** worked examples from this plan distinguish a tool-definition
    break from an expected git-snapshot break; cross-session reuse is handled;
-   unsupported explanations and missing prices remain explicit.
+   unsupported explanations and missing prices remain explicit; the Iris
+   compaction recordings (findings 11–13 of 2026-11-18) give the expected
+   before, after, and cost, including a compaction that did not pay off.
 5. **Complete Quota (C).** Normalize snapshots, show freshness/reset windows,
    and add qualified forecasts with documented evidence requirements.
    **Check:** missing headers preserve the last observation, resets do not

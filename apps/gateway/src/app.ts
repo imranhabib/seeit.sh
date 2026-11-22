@@ -19,6 +19,9 @@ import { createCallRecorder, type Hooks } from "./record-call.ts";
 export function createApp(config: Config, hooks: Hooks = {}, delivery?: Delivery) {
   const app = new Hono();
   const recordCall = createCallRecorder(config, hooks, delivery);
+  // Request order within this process (ADR 0008): taken when the request
+  // arrives, because calls can finish (and be recorded) in another order.
+  let lastSeq = 0;
 
   app.all("/:harness/*", async (c) => {
     const harness = c.req.param("harness") as Harness;
@@ -26,6 +29,7 @@ export function createApp(config: Config, hooks: Hooks = {}, delivery?: Delivery
     if (!upstreamBase) return c.json({ error: `unknown harness "${harness}"` }, 404);
 
     const id = randomUUID();
+    const seq = ++lastSeq;
     const startedAt = new Date().toISOString();
     const start = performance.now();
 
@@ -59,6 +63,7 @@ export function createApp(config: Config, hooks: Hooks = {}, delivery?: Delivery
     // Not awaited: analysis and storage must never delay the response.
     void recordCall({
       id,
+      seq,
       startedAt,
       start,
       harness,
