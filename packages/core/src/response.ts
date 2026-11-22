@@ -7,7 +7,7 @@
 // had been parsed live.
 
 import { PROVIDER_FOR, createInterpreter } from "./provider/index.ts";
-import type { Harness, StreamSummary } from "./provider/model.ts";
+import { parseJson, type Harness, type Json, type StreamSummary } from "./provider/model.ts";
 import { createSseParser } from "./sse.ts";
 
 export type CapturedResponse = {
@@ -54,4 +54,11 @@ export function interpretResponse(harness: Harness, response: CapturedResponse):
     for (const e of parser.flush()) interpreter.onEvent(e, response.timeToStreamEndMs);
   }
   return { isStream: isStream === true, summary: interpreter.summary() };
+}
+
+/** The JSON data of every event in a stream body, for analysis that reads whole events (ADR 0009 details). */
+export function streamEvents(text: string): Json[] {
+  const parser = createSseParser();
+  const events = [...parser.push(text), ...parser.flush()];
+  return events.map((e) => parseJson(e.data)).filter((d): d is Json => d !== null);
 }

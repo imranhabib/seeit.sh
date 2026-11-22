@@ -84,7 +84,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
   const fake = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
   const recordDir = await mkdtemp(join(tmpdir(), "seeit-test-"));
-  const app = createApp({ host: "127.0.0.1", port: 0, recordDir, upstreams: { claude: fake, codex: fake } }, {
+  const app = createApp({ host: "127.0.0.1", port: 0, recordDir, userId: "tester", upstreams: { claude: fake, codex: fake } }, {
     onRecordedCall,
     onRecorded: (file) => recordedWaiters.shift()?.(file),
   });
@@ -217,6 +217,21 @@ describe("recorded calls", () => {
     const next = await send([{ role: "user", content: "thanks, now another" }]);
     expect(toolLoop).toBe(first);
     expect(next).not.toBe(first);
+  });
+
+  // ADR 0009: every call belongs to a user. ADR 0008: a sequence number per
+  // gateway process, in request order, breaks ties in startedAt.
+  it("sends the configured user and a sequence number in request order", async () => {
+    const seqs: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const call = nextCall("POST", "/v1/messages");
+      await (await fetch(`${gatewayUrl}/claude/v1/messages`, { method: "POST", body: JSON.stringify({ messages: [] }) })).text();
+      const seen = await call;
+      expect(seen.recorded.userId).toBe("tester");
+      seqs.push(seen.recorded.seq);
+    }
+    expect(seqs[1]).toBe(seqs[0]! + 1);
+    expect(seqs[2]).toBe(seqs[1]! + 1);
   });
 
   it("records a Codex call whose SSE has no content-type, converting cached input", async () => {

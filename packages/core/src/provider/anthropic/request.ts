@@ -22,7 +22,12 @@ export function readClaudeRequest(method: string, path: string, headers: Headers
   //   the turn tracker still links them to the session's turn in progress.
   const hasClientTool = tools.some((t) => t?.type === undefined || t.type === "custom");
   const hasServerTool = tools.some((t) => typeof t?.type === "string" && t.type !== "custom");
-  const kind: CallKind = method === "HEAD" ? "connectivity" : isMessages && (hasClientTool || hasServerTool) ? "turn" : "background";
+  // - A compaction is not a turn (ADR 0009): the user did not ask for a
+  //   model answer. Only the hint header says so; without it, /compact
+  //   cannot be told apart and stays a turn.
+  const isCompaction = headers.has("x-claude-code-compaction");
+  const kind: CallKind =
+    method === "HEAD" ? "connectivity" : isMessages && !isCompaction && (hasClientTool || hasServerTool) ? "turn" : "background";
   // Only the agent loop can start a turn. A server-tool-only call ends in a
   // message the tool wrote ("Perform a web search for ..."), not the user.
   const newPrompt = kind === "turn" && hasClientTool ? newUserText(body.messages) : null;

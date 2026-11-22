@@ -157,4 +157,10 @@ describe("resendsTurnStart", () => {
     expect(resendsTurnStart(null, key("hi"))).toBe(false);
     expect(resendsTurnStart(key("hi"), null)).toBe(false);
   });
+
+  // ADR 0009: a compaction is not a turn. Seen with hint headers on (Claude Code 2.1.326, /compact).
+  it("makes the compaction call a background call when the hint header says so", () => {
+    const info = claude({ tools: [tool], messages: [{ role: "user", content: "Summarize the conversation" }] }, { "x-claude-code-compaction": "manual" });
+    expect(info).toMatchObject({ kind: "background", startsNewTurn: false });
+  });
 });

@@ -59,7 +59,7 @@ beforeAll(async () => {
   const ledgerUrl = `http://127.0.0.1:${(ledgerService.address() as AddressInfo).port}`;
   delivery = createDelivery({ ...DEFAULT_DELIVERY, url: ledgerUrl, token: "write-token", timeoutMs: 300, maxAttempts: 1 }, { log: () => {} });
   const recordDir = await mkdtemp(join(tmpdir(), "seeit-test-"));
-  const app = createApp({ host: "127.0.0.1", port: 0, recordDir, upstreams: { claude: fake, codex: fake } }, {}, delivery);
+  const app = createApp({ host: "127.0.0.1", port: 0, recordDir, userId: "local", upstreams: { claude: fake, codex: fake } }, {}, delivery);
   await new Promise<void>((resolve) => {
     gateway = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, (info) => {
       gatewayUrl = `http://127.0.0.1:${info.port}`;

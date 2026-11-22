@@ -42,8 +42,8 @@ Where turn IDs come from:
    process, to break ties. The ledger orders a session's calls by
    `(startedAt, seq)`. Provider timestamps and ledger arrival time are not
    used.
-4. **Turn inputs are stored on each call,** as columns that outlive body
-   retention: session ID, `startedAt`, sequence number, kind, agent ID,
+4. **Turn inputs are stored on each call,** as columns, so they never depend
+   on the bodies: session ID, `startedAt`, sequence number, kind, agent ID,
    explicit turn ID, whether the request starts a turn, and the turn key
    (block hashes, not text). The ledger derives them from the request body it
    receives: parsing runs in the ledger (PLAN.md, service boundaries,

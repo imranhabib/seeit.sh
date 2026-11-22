@@ -142,7 +142,7 @@ export const SCENARIOS: Scenario[] = [
   {
     id: "claude-compaction",
     harness: "claude",
-    about: "/compact, and a new prompt after it. The compact call itself counts as a turn.",
+    about: "/compact, and a new prompt after it. With hint headers on, the compact call is a background call, not a turn (ADR 0009).",
     allowedTools: READ_ONLY,
     slashCommands: true,
     steps: [
@@ -152,11 +152,10 @@ export const SCENARIOS: Scenario[] = [
       { prompt: "/compact", continue: true },
       { prompt: "What did we talk about so far?", continue: true },
     ],
-    // The /compact call still counts as a turn: the parser does not read the
-    // compaction header yet (ADR 0009 makes it background). No
-    // x-claude-code-context-compacted: each -p step is a new process, and
-    // the next process did not send it (seen 2026-11-18).
-    expect: { turns: 5, saw: ["hint:compaction:manual", "hint:request-class:compaction"] },
+    // The /compact call is background (x-claude-code-compaction), so 4 turns
+    // for 5 steps. No x-claude-code-context-compacted: each -p step is a new
+    // process, and the next process did not send it (seen 2026-11-18).
+    expect: { turns: 4, saw: ["hint:compaction:manual", "hint:request-class:compaction"] },
   },
   {
     id: "codex-compaction",

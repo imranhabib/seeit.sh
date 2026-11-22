@@ -22,6 +22,8 @@ export type Hooks = {
 /** What the hot path knows about one proxied call. */
 export type ProxiedCall = {
   id: string;
+  /** Request order within this gateway process (ADR 0008). */
+  seq: number;
   startedAt: string;
   /** performance.now() when the call arrived; all timings count from here. */
   start: number;
@@ -45,7 +47,7 @@ export function createCallRecorder(config: Config, hooks: Hooks = {}, delivery?:
   const turns = createTurnTracker();
 
   return async function recordCall(call: ProxiedCall): Promise<void> {
-    const { id, startedAt, start, harness, method, path, requestHeaders, requestBody, signal, upstream, responseStream, timeToResponseHeadersMs } = call;
+    const { id, seq, startedAt, start, harness, method, path, requestHeaders, requestBody, signal, upstream, responseStream, timeToResponseHeadersMs } = call;
     // Yield first, so request parsing happens after the response has started.
     // setImmediate callbacks run in the order they were scheduled, so the
     // turn tracker still sees calls in request order.
@@ -60,6 +62,8 @@ export function createCallRecorder(config: Config, hooks: Hooks = {}, delivery?:
     // What the ledger service will receive (ADR 0007): redacted, parsed nowhere yet.
     const recorded: RecordedCall = {
       id,
+      userId: config.userId,
+      seq,
       startedAt,
       harness,
       method,

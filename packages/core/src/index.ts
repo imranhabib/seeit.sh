@@ -6,6 +6,20 @@ export { decideCompletion, type Completion } from "./completion.ts";
 export { FIXTURE_FOR_VERSION, hasFixture } from "./tested-versions.ts";
 export { analyzeCall, type AnalyzedCall, type CallFields, type RecordedCall } from "./call.ts";
 export { callFlags, type Flag } from "./flags.ts";
+export { hashPiece, rebuildRequest, requestPieces } from "./pieces.ts";
+export {
+  CONTEXT_ANALYSIS_VERSION,
+  type CallDetails,
+  type CallRecords,
+  type ContextCategory,
+  type ContextPart,
+  type ModelCatalogEntry,
+  type QuotaWindow,
+  type RequestPiece,
+  type ToolResult,
+  type ToolUse,
+  type ToolUseKind,
+} from "./records.ts";
 export { interpretResponse, type CapturedResponse } from "./response.ts";
 export { PROVIDER_FOR, createInterpreter, quotaHeaders, readRequest, usageFromJsonBody } from "./provider/index.ts";
 export {

@@ -15,6 +15,13 @@
       "when": 1794959526414,
       "tag": "0001_sudden_slapstick",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795051686980,
+      "tag": "0002_watery_scrambler",
+      "breakpoints": true
     }
   ]
 }

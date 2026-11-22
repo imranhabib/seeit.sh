@@ -4,6 +4,8 @@ import { createDelivery, type DeliveryOptions } from "../../src/delivery.ts";
 
 const call = (id: string, body = "x"): RecordedCall => ({
   id,
+  userId: "local",
+  seq: 1,
   startedAt: "2026-11-18T00:00:00.000Z",
   harness: "claude",
   method: "POST",

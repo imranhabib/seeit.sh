@@ -11,6 +11,8 @@ const app = createApp(noDatabase, { writeToken: "secret-token" });
 const body = 'event: message_stop\ndata: {"type":"message_stop"}\n\n';
 const valid = (): RecordedCall => ({
   id: "c1",
+  userId: "local",
+  seq: 1,
   startedAt: "2026-11-18T00:00:00.000Z",
   harness: "claude",
   method: "POST",
@@ -60,6 +62,9 @@ describe("checkRecordedCall", () => {
 
   it.each([
     ["id", { id: "" }, "id must be a string of 1-200 characters"],
+    ["userId", { userId: undefined }, "userId must be a string of 1-200 characters"],
+    ["seq", { seq: -1 }, "seq must be a non-negative integer"],
+    ["seq type", { seq: "1" }, "seq must be a non-negative integer"],
     ["startedAt", { startedAt: "yesterday" }, "startedAt must be an ISO 8601 time"],
     ["headers", { request: { headers: { a: 1 }, body: null } }, "request must have string headers and a string or null body"],
     ["status", { response: { ...valid().response, status: 42 } }, "response.status must be an HTTP status or null"],

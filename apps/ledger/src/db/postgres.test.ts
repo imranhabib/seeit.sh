@@ -9,7 +9,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
 import { openDatabase, type LedgerDatabase } from "./database.ts";
-import { bodies, calls, type CallRow } from "./schema.ts";
+import { bodies, calls, sessions, turns, users, type CallRow } from "./schema.ts";
 
 const testUrl = process.env.SEEIT_TEST_DATABASE_URL;
 
@@ -28,6 +28,8 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
     url.pathname = `/${name}`;
     connectionString = url.toString();
     database = await openDatabase(connectionString);
+    // Every call belongs to a user (ADR 0009).
+    await database.db.insert(users).values({ id: "local" });
   });
 
   afterAll(async () => {
@@ -46,6 +48,7 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
   function call(id: string, overrides: Partial<CallRow> = {}): CallRow {
     return {
       id,
+      userId: "local",
       startedAt: new Date("2026-11-17T12:34:56.789Z"),
       harness: "claude",
       kind: "turn",
@@ -58,6 +61,10 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
   }
 
   it("round-trips every metadata field without narrowing counters or timings", async () => {
+    // A call's session and turn must exist (ADR 0009).
+    const at = new Date("2026-11-17T12:34:56.789Z");
+    await database.db.insert(sessions).values({ userId: "local", harness: "claude", id: "session-1", firstCallAt: at, lastCallAt: at });
+    await database.db.insert(turns).values({ id: "turn-1", userId: "local", harness: "claude", sessionId: "session-1", startedAt: at, source: "inferred" });
     const row: typeof calls.$inferSelect = {
       ...call("metadata"),
       harnessVersion: "claude-cli/test", sessionId: "session-1", turnId: "turn-1", agentId: "agent-1",
@@ -71,6 +78,13 @@ describe.skipIf(!testUrl)("PostgreSQL ledger foundation", () => {
       toolsCount: 11, toolsChars: 5_000_000_000, instructionsChars: 400,
       quota: { "test-limit": "0.25" }, flags: ["test-flag"],
       unknownEvents: { "test.event": 2 }, unknownUsageFields: ["test_field"],
+      seq: 9_007_199_254_740_991, providerRequestId: "req_1",
+      compactionTrigger: "auto", compactionReason: "context_limit", compactionPhase: "pre_turn", compactionStrategy: "memento",
+      cacheTtl: "1h", cacheWrite30mTokens: 1, cacheWrite12hTokens: 2, promptCacheRetention: "24h",
+      contextEdits: [], cacheMissReason: { type: "model_changed", cache_missed_input_tokens: 5 }, usageIterations: [{ type: "message" }],
+      requestKind: "compaction", contextWindowNumber: 3, historyInitialization: "cold_resume",
+      harnessTurnStartedAt: new Date("2026-11-17T12:34:55.001Z"), harnessBuild: "2.1.326.f48", entrypoint: "sdk-cli", retryCount: 0,
+      reasoningEffort: "medium", thinkingType: "adaptive", serviceTier: "standard", inferenceGeo: "global", features: ["a", "b"],
     };
     await database.db.insert(calls).values(row);
     const [stored] = await database.db.select().from(calls).where(eq(calls.id, row.id));

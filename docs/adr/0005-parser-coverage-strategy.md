@@ -56,9 +56,9 @@ layers:
    the final `message_delta` without a fallback block), and flags the first
    call from a harness version with no fixtures. Flags are stored on the
    ledger row.
-4. **Flagged calls become fixtures.** Bodies are kept 14 days, so a flagged
-   call can be turned into a redacted fixture, reviewed, given an expected
-   result, and fixed against.
+4. **Flagged calls become fixtures.** Bodies are kept (no retention since
+   2026-11-18), so a flagged call can be turned into a redacted fixture,
+   reviewed, given an expected result, and fixed against.
 
 The parser stays **fail-soft**: unknown events are ignored, missing usage
 becomes an estimate with a flag, completion is decided from events. A new

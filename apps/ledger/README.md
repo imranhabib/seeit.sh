@@ -67,9 +67,9 @@ Stopping the ledger does not stop the existing gateway process.
 and one `RecordedCall` as JSON (`packages/core/src/call.ts`): the redacted
 request and response, the decoded bodies, when each response piece arrived,
 and the facts only the gateway knows (timings, client aborted, read failed,
-turn ID). The ledger analyzes it with `analyzeCall` from `@seeit/core`, adds
-the untested-version flag, and stores the call and its gzipped bodies in one
-transaction.
+turn ID, user ID, sequence number). The ledger analyzes it with `analyzeCall`
+from `@seeit/core`, adds the untested-version flag, and stores everything in
+one transaction (`src/store.ts`; the tables are below).
 
 | Status | Meaning |
 | --- | --- |
@@ -107,8 +107,26 @@ mappings:
 - Quota, server-tool counts, and drift information use structured `jsonb`.
   SQL null means missing/unchecked; `[]` and `{}` mean checked and empty.
 - Gzipped bodies use `bytea`/`Buffer`. Body rows reference calls with cascading
-  deletion. Bodies older than 14 days are deleted at startup and every 6 hours
-  (`src/db/retention.ts`); call rows are kept.
+  deletion. There is no retention for now: bodies and call rows are kept
+  (decided 2026-11-18).
+
+The tables around `calls` ([ADR 0009](../../docs/adr/0009-ledger-data-model.md)):
+
+| Table | One row per |
+| --- | --- |
+| `users` | seeit user; the gateway sends `SEEIT_USER_ID` (default `local`), and the ledger adds the row the first time it sees it |
+| `sessions` | user, harness, and harness session ID |
+| `turns` | turn; `source` says whether the harness sent its ID or the gateway inferred it |
+| `body_pieces` | distinct request piece per user, harness, and session (gzipped JSON, without `cache_control` markers) |
+| `call_pieces` | piece of one request, in order, with the markers taken out; `rebuildRequest` in `@seeit/core` puts a request back together |
+| `bodies` | response, gzipped. `request_gz` is no longer written; calls stored before ADR 0009 keep their whole request there |
+| `tool_uses` | tool the response asked for: labels only; `result_chars` is filled when the next request carries the result |
+| `quota_windows` | plan-quota window a response reported. `window` is a reserved word in SQL: quote it (`"window"`) |
+| `context_parts` | part of the prompt, with tokens and cache state (`tokens_source`: `provider`, `breakpoint`, or `estimated`) |
+| `model_catalog` | Codex model per user and harness version, from `GET /models`; the newest observation wins |
+
+The migration that adds them puts calls already stored under the user
+`local` and creates their sessions and turns.
 
 The ledger started empty: calls the gateway recorded to its old SQLite file
 (`data/seeit.db`) were not imported (decided 2026-11-18). That file is no
@@ -144,7 +162,7 @@ no PostgreSQL server.
 For a manual persistence check, insert a synthetic row through `psql`:
 
 ```bash
-psql "$SEEIT_LEDGER_DATABASE_URL" -c "INSERT INTO calls (id, started_at, harness, kind, method, path, completion, tokens_estimated) VALUES ('manual-persistence-check', now(), 'claude', 'background', 'POST', '/synthetic', 'complete', false) ON CONFLICT DO NOTHING;"
+psql "$SEEIT_LEDGER_DATABASE_URL" -c "INSERT INTO users (id) VALUES ('local') ON CONFLICT DO NOTHING; INSERT INTO calls (id, user_id, started_at, harness, kind, method, path, completion, tokens_estimated) VALUES ('manual-persistence-check', 'local', now(), 'claude', 'background', 'POST', '/synthetic', 'complete', false) ON CONFLICT DO NOTHING;"
 ```
 
 Stop the ledger with Ctrl+C, then restart the native database:
