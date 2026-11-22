@@ -20,22 +20,16 @@ passes your credentials through unchanged and never stores them.
 | Phase | What | State |
 | --- | --- | --- |
 | 0 | Recorder spike: pass-through proxy that records redacted traffic | ✅ done |
-| 1 | Stream parsing, usage, sessions and turns, SQLite ledger | ✅ done (cost estimates move to Phase 2) |
-| 1C | Separate ledger service, PostgreSQL, background HTTP delivery, native/Docker local operation | next |
-| 2 | Observability: Langfuse traces, custom dashboard | planned |
+| 1 | Stream parsing, usage, sessions and turns, completion, drift flags | ✅ done (cost estimates move to Phase 2) |
+| 1C | Separate ledger service with PostgreSQL, background delivery from the gateway | ✅ ledger, ingestion, delivery, cutover, data model · next: turn assignment in the ledger, read API, Docker |
+| 2 | Observability: prices, dashboard, Langfuse traces | planned |
 | 3 | Budgets and blocking, repo attribution | planned |
 | 4 | Transforms, model router | planned |
 
-The full plan is in [docs/PLAN.md](docs/PLAN.md), and the key decisions are in
-[docs/adr/](docs/adr/).
+What to do next, in order, and the decisions in force are at the top of
+[docs/PLAN.md](docs/PLAN.md). The key decisions are in [docs/adr/](docs/adr/).
 
-## Next architecture
-
-The next milestone separates the gateway from storage and dashboard work.
-Gateway, ledger, and dashboard stay in this monorepo, with gateway and ledger
-running as separate services. The gateway and ledger parts are built: the
-gateway sends every call to the ledger service, which stores it in PostgreSQL.
-The dashboard is next.
+## Architecture
 
 ```text
 Claude Code / Codex ──▶ Gateway ──▶ Model provider
@@ -44,46 +38,29 @@ Claude Code / Codex ──▶ Gateway ──▶ Model provider
                           ▼
                       Ledger service ──▶ PostgreSQL
                           ▲
-                          │ read-only HTTP access
-                   Dashboard / CLI
+                          │ read-only HTTP access (planned)
+                   Dashboard / CLI (planned)
 ```
 
-- **Gateway:** forwards raw traffic and streams provider responses immediately.
-  It scrubs credentials from recording copies before writing locally or sending
-  them to the ledger. Forwarded harness credentials remain unchanged.
-- **Ledger:** owns recording ingestion, PostgreSQL access, migrations, retention,
-  analysis, and read APIs. The gateway will have no PostgreSQL credentials.
-- **Dashboard:** explains session token accumulation, context composition,
-  cache behavior, and quota. It will work standalone and inside **Morpheus**,
-  our Open WebUI fork in a separate repository. Langfuse remains the planned
-  tool for general trace browsing.
+- **Gateway** (`apps/gateway`, built): forwards raw traffic and streams
+  provider responses immediately. It scrubs credentials from its recording
+  copy, then sends each call to the ledger in the background. It has no
+  database.
+- **Ledger** (`apps/ledger`, built): takes recorded calls over authenticated
+  HTTP, analyzes them with `@seeit/core`, and stores them in PostgreSQL. It
+  owns migrations and, later, the read API.
+- **Dashboard** (planned): explains session token use, context composition,
+  cache behavior, compaction, and quota. It will work standalone and inside
+  **Morpheus**, our Open WebUI fork in a separate repository.
+- **Iris** (`apps/iris`, built): drives the real Claude Code and Codex through
+  the gateway and checks what the ledger stored.
 
-PostgreSQL is owned by the ledger service but runs as its own process or
-container. Planned runtime modes are:
-
-| Mode | Setup |
-| --- | --- |
-| Native local | Separate gateway and ledger Node processes plus locally installed PostgreSQL. Docker is not required. |
-| Docker local | Compose starts separate gateway, ledger, and PostgreSQL containers, with persistent database storage. |
-| Cloud | Gateway and ledger deploy to separate instances using private service addresses; PostgreSQL runs separately from the ledger process. |
-
-All modes use the same authenticated HTTP contract and recording-delivery
-rules. Recording never waits for the ledger on the provider-streaming path.
-V1 uses bounded in-memory pending recordings and retries; pending recordings
-can be lost on restart, retry exhaustion, or queue saturation. A durable local
-outbox and restart replay are deferred to v2. PostgreSQL persistence does not
-protect a recording that has not reached the ledger yet.
-
-Harnesses continue to point their base URL at the gateway. Docker and cloud
-deployment change service addresses, not this interface. Native local startup
-and Docker will use the same application entry points.
-
-See [ADR 0007](docs/adr/0007-ledger-service-and-postgres.md) for the decision and
-[the delivery sequence](docs/PLAN.md#phase-1c--ledger-service-and-delivery-next)
-for the small PRs that implement it. Each PR includes a testing and code
-walkthrough before the next slice starts. Native PostgreSQL and ledger startup
-are documented in [apps/ledger/README.md](apps/ledger/README.md).
-Read APIs and Docker startup remain planned.
+Native local operation (separate Node processes plus a local PostgreSQL)
+works today, with no Docker. Docker Compose and cloud deployment are planned.
+Delivery to the ledger is best effort: pending recordings are held in a
+bounded in-memory queue and can be lost on a gateway restart. Recording never
+delays the response to the harness. See
+[ADR 0007](docs/adr/0007-ledger-service-and-postgres.md).
 
 ## Quick start
 
@@ -119,7 +96,8 @@ For Codex, see [docs/phase-0-recorder.md](docs/phase-0-recorder.md).
 
 Every call becomes one row in the ledger's PostgreSQL database, with tokens,
 timings, turn, completion status, and plan-quota headers. Request and response
-bodies are stored gzipped and kept. The ledger prints one line per stored
+bodies are stored gzipped and kept; requests are stored as pieces, so text
+that repeats within a session is stored once (ADR 0009). The ledger prints one line per stored
 call. For example, recent calls:
 
 ```bash
@@ -137,6 +115,7 @@ Raw JSON recordings of each call are also written to `data/recordings/`
 ```
 apps/gateway     Hono proxy server (TypeScript, Node 24)
 apps/ledger      ledger service: recording ingestion, analysis, PostgreSQL storage
+apps/iris        live harness runs through the gateway, checked against the ledger
 apps/dashboard   planned: Vite + React dashboard
 packages/core    shared parsers and helpers
 docs/            plan, ADRs, phase notes

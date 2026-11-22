@@ -1,6 +1,6 @@
 # 0007 — Separate ledger service with PostgreSQL
 
-**Status:** accepted; implementation pending
+**Status:** accepted; the ledger service, ingestion, gateway delivery, and storage cutover are implemented; the read API and Docker packaging are pending
 
 Keep gateway, ledger, and dashboard in one monorepo, with gateway and ledger
 running as separate services. The ledger owns PostgreSQL access, ingestion,
